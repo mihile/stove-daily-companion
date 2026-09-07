@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.1
+// @version      1.0.2
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -137,18 +137,30 @@
     const row = rows.get(id);
     if (!row) return;
     row.value = value;
-    row.badge.textContent =
-      { "스캔 중": "확인 중", 중단됨: "중단", "갱신 대기": "갱신 중" }[
-        value.state
-      ] || value.state;
+    const retryable = value.state === "확인 필요";
+    row.badge.textContent = retryable
+      ? "재시도"
+      : { "스캔 중": "확인 중", 중단됨: "중단", "갱신 대기": "갱신 중" }[
+          value.state
+        ] || value.state;
+    row.badge.disabled = !retryable || running;
+    row.badge.title = retryable ? value.detail : "";
     row.detail.textContent = value.detail;
     row.badge.style.color =
-      value.state === "완료됨"
-        ? "#79dfa7"
-        : value.state === "확인 필요"
-          ? "#ffb884"
-          : "#afd2ff";
+      value.state === "완료됨" ? "#79dfa7" : retryable ? "#ffb884" : "#afd2ff";
+    row.badge.style.background = retryable ? "#55351f" : "transparent";
+    row.badge.style.border = retryable ? "1px solid #d98b4b" : "0";
+    row.badge.style.borderRadius = retryable ? "4px" : "0";
+    row.badge.style.padding = retryable ? "1px 5px" : "0";
+    row.badge.style.cursor = retryable && !running ? "pointer" : "default";
     summary.textContent = `완료 ${[...rows.values()].filter((r) => r.value?.state === "완료됨").length}/${TASKS.length} · 확인·처리 중`;
+  }
+  function refreshRetryButtons() {
+    for (const row of rows.values()) {
+      const retryable = row.value?.state === "확인 필요";
+      row.badge.disabled = !retryable || running;
+      row.badge.style.cursor = retryable && !running ? "pointer" : "default";
+    }
   }
   function missionButton(name) {
     const labels = [...document.querySelectorAll("p")].filter(
@@ -937,6 +949,7 @@
       if (GM_getValue(LOCK, null)?.id === leaseId) GM_deleteValue(LOCK);
       running = false;
       for (const b of modeButtons) b.disabled = false;
+      refreshRetryButtons();
       const count = [...rows.values()].filter(
         (r) => r.value.state === "완료됨",
       ).length;
@@ -944,6 +957,62 @@
         count === TASKS.length
           ? "전체 완료됨"
           : `${scan ? "스캔" : "처리"} 종료 · 완료 ${count}/${TASKS.length}`;
+    }
+  }
+  async function retryTask(id, execute = executeTask) {
+    if (running) return;
+    const task = TASKS.find((item) => item.id === id),
+      row = rows.get(id);
+    if (!task || row?.value?.state !== "확인 필요") return;
+    if (
+      location.hostname !== "reward.onstove.com" ||
+      location.pathname !== "/ko/event"
+    ) {
+      log("재시도는 캡슐 뽑기 페이지의 결과 패널에서 실행하세요.");
+      return;
+    }
+    const existing = GM_getValue(LOCK, null);
+    if (existing && Date.now() - existing.time < 15000) {
+      log("다른 창에서 일일 보상 실행 중입니다.");
+      return;
+    }
+    running = true;
+    stopped = false;
+    leaseId = crypto.randomUUID();
+    GM_setValue(LOCK, { id: leaseId, time: Date.now() });
+    await sleep(300);
+    if (GM_getValue(LOCK, null)?.id !== leaseId) {
+      running = false;
+      refreshRetryButtons();
+      log("다른 창에서 실행을 시작했습니다.");
+      return;
+    }
+    for (const b of modeButtons) b.disabled = true;
+    refreshRetryButtons();
+    const heartbeat = setInterval(() => {
+      if (GM_getValue(LOCK, null)?.id === leaseId)
+        GM_setValue(LOCK, { id: leaseId, time: Date.now() });
+    }, 1000);
+    status(id, result("재시도 중", "해당 항목만 다시 확인합니다."));
+    try {
+      const value = await execute(task, false, modeSelect.value);
+      if (value) status(id, value);
+    } catch (e) {
+      status(id, result("확인 필요", e.message));
+      log(`${task.name} 재시도 실패: ${e.message}`);
+    } finally {
+      clearInterval(heartbeat);
+      if (GM_getValue(LOCK, null)?.id === leaseId) GM_deleteValue(LOCK);
+      running = false;
+      for (const b of modeButtons) b.disabled = false;
+      refreshRetryButtons();
+      const completed = [...rows.values()].filter(
+        (item) => item.value?.state === "완료됨",
+      ).length;
+      summary.textContent =
+        rows.get(id)?.value?.state === "완료됨"
+          ? `${task.name} 재시도 완료 · 전체 ${completed}/${TASKS.length}`
+          : `${task.name} 재시도 실패 · 버튼을 눌러 다시 시도할 수 있습니다.`;
     }
   }
   function stop() {
@@ -965,7 +1034,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.1";
+    title.textContent = "Stove Daily Companion · 1.0.2";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
@@ -1041,9 +1110,12 @@
         }[task.id] || task.name;
       name.title = task.name;
       name.style.cssText = "min-width:0;overflow-wrap:anywhere";
-      const badge = document.createElement("strong");
+      const badge = document.createElement("button");
+      badge.type = "button";
+      badge.disabled = true;
+      badge.onclick = () => retryTask(task.id);
       badge.style.cssText =
-        "flex:0 0 auto;color:#afd2ff;white-space:nowrap;text-align:right";
+        "all:unset;flex:0 0 auto;color:#afd2ff;white-space:nowrap;text-align:right;font-weight:700";
       badge.textContent = "미확인";
       const detail = document.createElement("div");
       detail.style.cssText =

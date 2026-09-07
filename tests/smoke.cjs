@@ -10,7 +10,7 @@ const entry = code.lastIndexOf("if (document.readyState");
 if (entry < 0) throw new Error("Initialization entry not found");
 code =
   code.slice(0, entry) +
-  "globalThis.h={init,start,stop,today,runPlan,runMissionBatch,month,runDraw,claim,runShop,runMission,shopButton,missionButton,drawCount,closeOfferwall,parseFlakes,totals,history,executeTask};})();";
+  "globalThis.h={init,start,stop,today,runPlan,runMissionBatch,month,runDraw,claim,runShop,runMission,shopButton,missionButton,drawCount,closeOfferwall,parseFlakes,totals,history,executeTask,status,retryTask};})();";
 let passed = 0;
 function fixture(html = "", options = {}) {
   const dom = new JSDOM(html, {
@@ -397,6 +397,32 @@ function drawFixture(
     assert.equal(panel.style.width, "350px");
     assert.equal(grid.children.length, 8);
     assert(grid.style.gridTemplateColumns.includes("repeat(2"));
+    f.close();
+  });
+  await test("실패 항목만 재시도하고 결과에 따라 버튼 상태 변경", async () => {
+    const f = fixture();
+    f.h.init();
+    const retry = f.doc.querySelector("#stove-daily-status-grid button");
+    f.h.status("riichi", { state: "확인 필요", detail: "일시 오류" });
+    assert.equal(retry.textContent, "재시도");
+    assert.equal(retry.disabled, false);
+    assert.equal(typeof retry.onclick, "function");
+    const calls = [];
+    await f.h.retryTask("riichi", async (task, scan, mode) => {
+      calls.push({ id: task.id, scan, mode });
+      return { state: "완료됨", detail: "재시도 성공" };
+    });
+    assert.deepEqual(calls, [{ id: "riichi", scan: false, mode: "100" }]);
+    assert.equal(retry.textContent, "완료됨");
+    assert.equal(retry.disabled, true);
+    f.h.status("riichi", { state: "확인 필요", detail: "다시 실패" });
+    await f.h.retryTask("riichi", async () => ({
+      state: "확인 필요",
+      detail: "다시 실패",
+    }));
+    assert.equal(retry.textContent, "재시도");
+    assert.equal(retry.disabled, false);
+    assert(retry.title.includes("다시 실패"));
     f.close();
   });
   for (const [initial, mode, n] of [
