@@ -240,6 +240,40 @@ function drawFixture(
     );
     f.close();
   });
+  await test("서로 다른 작업 탭의 보상 수령 요청 직렬화", async () => {
+    const f = fixture(
+      "<button id='a'>받기</button><button id='b'>받기</button>",
+      {
+        url: "https://reward.onstove.com/ko#stoveDaily=claims",
+      },
+    );
+    f.store.set("stove_daily_v2:claims", {
+      owner: "owner",
+      date: f.h.today(),
+    });
+    f.store.set("stove_daily_v2:lock", {
+      id: "owner",
+      time: f.w.Date.now(),
+    });
+    let active = 0,
+      max = 0;
+    for (const b of f.doc.querySelectorAll("button"))
+      b.onclick = () => {
+        active++;
+        max = Math.max(max, active);
+        queueMicrotask(() => {
+          b.textContent = "완료";
+          active--;
+        });
+      };
+    const a = f.doc.querySelector("#a"),
+      b = f.doc.querySelector("#b");
+    const values = await Promise.all([f.h.claim(() => a), f.h.claim(() => b)]);
+    assert(values.every((value) => value.state === "완료됨"));
+    assert.equal(max, 1);
+    assert.equal(f.store.has("stove_daily_v2:claim-lock"), false);
+    f.close();
+  });
   await test("공지사항에서 선택 금액 전달 및 활성 새 탭", async () => {
     const f = fixture("", {
       url: "https://lostark.game.onstove.com/News/Notice/List",
