@@ -162,7 +162,7 @@ function drawFixture(
     assert.equal(calls.filter((id) => id === "mission3").length, 1);
     f.close();
   });
-  await test("3개 작업 병렬 시작 / 모두 끝난 뒤 뽑기", async () => {
+  await test("출석 2개는 직렬 / 미션은 병렬 / 모두 끝난 뒤 뽑기", async () => {
     const f = fixture(),
       started = [],
       releases = [];
@@ -172,11 +172,12 @@ function drawFixture(
         ? Promise.resolve()
         : new Promise((resolve) => releases.push(resolve));
     });
-    assert.deepEqual(started, ["riichi", "indie", "missions"]);
+    assert.deepEqual(started, ["riichi", "missions"]);
     releases[0]();
-    releases[1]();
-    await Promise.resolve();
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["riichi", "missions", "indie"]);
     assert(!started.includes("draw"));
+    releases[1]();
     releases[2]();
     await pending;
     assert.equal(started.at(-1), "draw");
@@ -240,40 +241,6 @@ function drawFixture(
     );
     f.close();
   });
-  await test("서로 다른 작업 탭의 보상 수령 요청 직렬화", async () => {
-    const f = fixture(
-      "<button id='a'>받기</button><button id='b'>받기</button>",
-      {
-        url: "https://reward.onstove.com/ko#stoveDaily=claims",
-      },
-    );
-    f.store.set("stove_daily_v2:claims", {
-      owner: "owner",
-      date: f.h.today(),
-    });
-    f.store.set("stove_daily_v2:lock", {
-      id: "owner",
-      time: f.w.Date.now(),
-    });
-    let active = 0,
-      max = 0;
-    for (const b of f.doc.querySelectorAll("button"))
-      b.onclick = () => {
-        active++;
-        max = Math.max(max, active);
-        queueMicrotask(() => {
-          b.textContent = "완료";
-          active--;
-        });
-      };
-    const a = f.doc.querySelector("#a"),
-      b = f.doc.querySelector("#b");
-    const values = await Promise.all([f.h.claim(() => a), f.h.claim(() => b)]);
-    assert(values.every((value) => value.state === "완료됨"));
-    assert.equal(max, 1);
-    assert.equal(f.store.has("stove_daily_v2:claim-lock"), false);
-    f.close();
-  });
   await test("공지사항에서 선택 금액 전달 및 활성 새 탭", async () => {
     const f = fixture("", {
       url: "https://lostark.game.onstove.com/News/Notice/List",
@@ -294,6 +261,22 @@ function drawFixture(
     assert.equal(f.store.get(key).mode, "1000");
     assert.equal(f.store.get(key).scan, false);
     assert.equal(f.w.location.hostname, "lostark.game.onstove.com");
+    f.close();
+  });
+  await test("기존 실행 중에는 공지사항에서 중복 탭 생성 금지", async () => {
+    const f = fixture("", {
+      url: "https://lostark.game.onstove.com/News/Notice/List",
+    });
+    f.store.set("stove_daily_v2:lock", {
+      id: "running",
+      time: f.w.Date.now(),
+    });
+    f.w.GM_openInTab = () => {
+      throw Error("중복 탭 생성 금지");
+    };
+    f.h.init();
+    await f.h.start(false);
+    assert(f.doc.body.textContent.includes("이미 다른 탭에서"));
     f.close();
   });
   await test("접힌 패널 실행 버튼 동작 / 펼치기 및 설정 복원", () => {

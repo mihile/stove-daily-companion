@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.2
+// @version      1.0.3
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -24,8 +24,7 @@
 (function dailyRewards() {
   "use strict";
   const PREFIX = "stove_daily_v2:",
-    LOCK = PREFIX + "lock",
-    CLAIM_LOCK = PREFIX + "claim-lock";
+    LOCK = PREFIX + "lock";
   const MISSIONS = [
     "다양한 게임 보러가기",
     "MY홈 방문하기",
@@ -230,68 +229,39 @@
       ) && !/오류|실패|로그인|연동|불가|조건|않았|않습니다/.test(norm);
     return { modal, message, success };
   }
-  async function acquireClaimLock() {
-    const id = (token || "main") + ":" + crypto.randomUUID();
-    const end = Date.now() + 45000;
-    while (Date.now() < end) {
-      check();
-      const held = GM_getValue(CLAIM_LOCK, null);
-      if (!held || Date.now() - held.time > 30000) {
-        GM_setValue(CLAIM_LOCK, { id, time: Date.now() });
-        await sleep(100);
-        if (GM_getValue(CLAIM_LOCK, null)?.id === id) return id;
-      }
-      await sleep(100);
-    }
-    throw new Error("다른 보상 수령이 끝나지 않아 대기 시간이 초과됐습니다.");
-  }
-  function releaseClaimLock(id) {
-    if (GM_getValue(CLAIM_LOCK, null)?.id === id) GM_deleteValue(CLAIM_LOCK);
-  }
   async function claim(read) {
-    let b = read();
+    const b = read();
     if (done(b)) return result("완료됨", "사이트의 완료 버튼 확인 · 건너뜀");
     if (!enabled(b)) return result("조건 미충족", "수령 버튼 비활성");
     if (dialogs().length)
       return result("확인 필요", "열린 안내 팝업을 확인하세요.");
-    const claimLease = await acquireClaimLock();
-    try {
-      b = read();
-      if (done(b))
-        return result("완료됨", "다른 수령 대기 중 완료 상태 확인 · 건너뜀");
-      if (!enabled(b)) return result("조건 미충족", "수령 버튼 비활성");
-      if (dialogs().length)
-        return result("확인 필요", "열린 안내 팝업을 확인하세요.");
-      check();
-      b.click();
-      return (
-        (await waitFor(() => {
-          const info = inspectModal();
-          if (info) {
-            if (info.success) {
-              const close = buttons(info.modal).find((el) =>
-                /^(확인|닫기)$/.test(text(el)),
-              );
-              if (close) {
-                check();
-                close.click();
-              }
-              return result("완료됨", info.message.slice(0, 140));
+    check();
+    b.click();
+    return (
+      (await waitFor(() => {
+        const info = inspectModal();
+        if (info) {
+          if (info.success) {
+            const close = buttons(info.modal).find((el) =>
+              /^(확인|닫기)$/.test(text(el)),
+            );
+            if (close) {
+              check();
+              close.click();
             }
-            return result("확인 필요", info.message.slice(0, 180));
+            return result("완료됨", info.message.slice(0, 140));
           }
-          return done(read())
-            ? result("완료됨", "클릭 후 사이트의 완료 상태 확인")
-            : null;
-        }, 15000)) ||
-        result(
-          "확인 필요",
-          "클릭했으나 완료 응답 미확인. 상태 스캔으로 확인하세요.",
-        )
-      );
-    } finally {
-      releaseClaimLock(claimLease);
-    }
+          return result("확인 필요", info.message.slice(0, 180));
+        }
+        return done(read())
+          ? result("완료됨", "클릭 후 사이트의 완료 상태 확인")
+          : null;
+      }, 15000)) ||
+      result(
+        "확인 필요",
+        "클릭했으나 완료 응답 미확인. 상태 스캔으로 확인하세요.",
+      )
+    );
   }
   async function visit(b, read = () => null) {
     if (!(await closeOfferwall())) throw new Error("게임 목록 팝업 닫기 실패");
@@ -852,8 +822,15 @@
   }
   async function runPlan(scan, mode, date, execute = executeTask) {
     check();
+    const shopTasks = TASKS.filter((task) => task.game);
+    const shops = (async () => {
+      for (const task of shopTasks) {
+        check();
+        await execute(task, scan, mode);
+      }
+    })();
     const results = await Promise.allSettled([
-      ...TASKS.filter((t) => t.game).map((t) => execute(t, scan, mode)),
+      shops,
       execute({ id: "missions", name: "미션 묶음" }, scan, mode),
     ]);
     check();
@@ -870,6 +847,12 @@
   async function start(scan = false) {
     if (running) return;
     if (location.hostname === "lostark.game.onstove.com") {
+      const existing = GM_getValue(LOCK, null);
+      if (existing && Date.now() - existing.time < 15000) {
+        summary.textContent = "이미 다른 탭에서 일일 보상을 처리 중입니다.";
+        log("다른 창에서 일일 보상 실행 중입니다. 새 탭을 열지 않았습니다.");
+        return;
+      }
       const id = crypto.randomUUID();
       const key = PREFIX + "launch:" + id;
       GM_setValue(key, { scan, mode: modeSelect.value, time: Date.now() });
@@ -914,6 +897,7 @@
     if (running) return;
     const existing = GM_getValue(LOCK, null);
     if (existing && Date.now() - existing.time < 15000) {
+      summary.textContent = "이미 다른 탭에서 일일 보상을 처리 중입니다.";
       log("다른 창에서 일일 보상 실행 중입니다.");
       return;
     }
@@ -1034,7 +1018,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.2";
+    title.textContent = "Stove Daily Companion · 1.0.3";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
