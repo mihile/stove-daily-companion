@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.4
+// @version      1.0.5
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -1020,7 +1020,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.4";
+    title.textContent = "Stove Daily Companion · 1.0.5";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
@@ -1060,12 +1060,18 @@
       b.dataset.value = value;
       b.dataset.label = name;
       b.onclick = () => {
-        if (!running) updateChoice(value);
+        if (!running) {
+          GM_setValue(PREFIX + "drawMode", value);
+          updateChoice(value);
+        }
       };
       modeButtons.push(b);
       group.append(b);
     }
-    updateChoice("100");
+    const savedMode = GM_getValue(PREFIX + "drawMode", "100");
+    updateChoice(
+      ["100", "1000", "none"].includes(savedMode) ? savedMode : "100",
+    );
     panel.append(group);
     const hint = document.createElement("div");
     hint.textContent = "하루 30회 · 오늘 남은 횟수만 뽑기";

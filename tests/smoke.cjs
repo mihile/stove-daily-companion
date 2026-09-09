@@ -18,7 +18,7 @@ function fixture(html = "", options = {}) {
       runScripts: "outside-only",
     }),
     w = dom.window,
-    store = new Map();
+    store = options.store || new Map();
   let now = options.time ?? Date.UTC(2026, 8, 5, 10);
   class Clock extends Date {
     constructor(...args) {
@@ -396,6 +396,47 @@ function drawFixture(
     assert.equal(choices[0].getAttribute("aria-pressed"), "false");
     assert.equal(choices[1].getAttribute("aria-pressed"), "true");
     assert.equal(f.doc.querySelectorAll("select").length, 0);
+    f.close();
+  });
+  await test("뽑기 선택은 다음 날 다른 페이지에서도 유지", () => {
+    const first = fixture();
+    first.h.init();
+    first.doc.querySelector('[data-value="1000"]').click();
+    const store = first.store;
+    first.close();
+    const next = fixture("", {
+      store,
+      time: Date.UTC(2026, 8, 6, 10),
+      url: "https://lostark.game.onstove.com/News/Notice/List",
+    });
+    next.h.init();
+    assert.equal(
+      next.doc
+        .querySelector('[data-value="1000"]')
+        .getAttribute("aria-pressed"),
+      "true",
+    );
+    next.doc.querySelector('[data-value="100"]').click();
+    next.close();
+    const reopened = fixture("", { store });
+    reopened.h.init();
+    assert.equal(
+      reopened.doc
+        .querySelector('[data-value="100"]')
+        .getAttribute("aria-pressed"),
+      "true",
+    );
+    reopened.close();
+  });
+  await test("유효하지 않은 저장 금액은 기본 100으로 표시", () => {
+    const f = fixture("", {
+      store: new Map([["stove_daily_v2:drawMode", "invalid"]]),
+    });
+    f.h.init();
+    assert.equal(
+      f.doc.querySelector('[data-value="100"]').getAttribute("aria-pressed"),
+      "true",
+    );
     f.close();
   });
   await test("상태 항목은 최대 너비에서 2열 카드로 표시", () => {

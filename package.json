@@ -1,6 +1,6 @@
 {
   "name": "stove-daily-companion",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "private": true,
   "description": "STOVE daily reward helper with in-tab capsule draws and local result history",
   "license": "MIT",
