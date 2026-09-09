@@ -4,14 +4,13 @@
 
 스토브 출석·미션 보상 수령과 **현재 탭의 캡슐 뽑기**를 동시에 진행하는 Tampermonkey 유저 스크립트입니다.
 
-## 설치
+## 설치 및 사용법
 
-1. 같은 STOVE 페이지에서 동작하는 다른 자동화 스크립트는 비활성화합니다.
-2. [스크립트 설치](https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js)를 열어 설치합니다. 설치 화면이 열리지 않으면 Tampermonkey 새 스크립트에 파일 전체를 붙여 넣고 저장합니다.
-3. 런처에서 로그인 후 연 [로스트아크 공지사항](https://lostark.game.onstove.com/News/Notice/List)을 새로고침합니다. [캡슐 뽑기 페이지](https://reward.onstove.com/ko/event)에서도 시작할 수 있습니다.
-4. 금액을 선택하고 **일일 보상 한 번에 받기**를 누릅니다.
-
-페이지를 열 때 기본 선택은 항상 **100 플레이크**입니다. 선택한 버튼에는 체크 표시가 붙고 밝은 배경과 어두운 글씨로 표시됩니다. 1,000 플레이크 또는 뽑기 안 함으로 바꿀 수 있습니다.
+1. [Tampermonkey](https://chromewebstore.google.com/detail/dhdgffkkebhmkfjojejmpbldmpobfkfo?utm_source=item-share-cb) 크롬 확장 프로그램 설치
+2. 크롬 확장 프로그램 목록에서 tampermonkey 아이콘 찾고, 세부정보 버튼 클릭 후 사용자 스크립트 허용 찾아 ON 하기
+3. [여기를 클릭](https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js)하시면 새로운 창이 뜹니다. 설치 버튼 찾아서 클릭하여 설치
+4. 스토브 로그인 후 로스트아크 게임 선택하시고 공지사항 옆 전체보기 클릭 시 로그인 된 상태로 [로스트아크 공지사항](https://lostark.game.onstove.com/News/Notice/List)이 브라우저에서 열립니다.
+5. 그 상태로 브라우저 새로고침하면 왼쪽 하단에 작은 창이 뜨고, 30뽑 금액을 선택 후 **일일 보상 한 번에 받기**를 누르면 자동으로 돌아갑니다!
 
 ## 처리 순서
 
