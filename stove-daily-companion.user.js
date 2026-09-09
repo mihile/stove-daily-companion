@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.3
+// @version      1.0.4
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -822,6 +822,8 @@
   }
   async function runPlan(scan, mode, date, execute = executeTask) {
     check();
+    if (today() !== date)
+      throw new Error("날짜가 바뀌었습니다. 다시 실행하세요.");
     const shopTasks = TASKS.filter((task) => task.game);
     const shops = (async () => {
       for (const task of shopTasks) {
@@ -832,17 +834,17 @@
     const results = await Promise.allSettled([
       shops,
       execute({ id: "missions", name: "미션 묶음" }, scan, mode),
+      execute(
+        TASKS.find((task) => task.draw),
+        scan,
+        mode,
+      ),
     ]);
     check();
     const failed = results.find((r) => r.status === "rejected");
     if (failed) throw failed.reason;
     if (today() !== date)
       throw new Error("날짜가 바뀌었습니다. 다시 실행하세요.");
-    await execute(
-      TASKS.find((t) => t.draw),
-      scan,
-      mode,
-    );
   }
   async function start(scan = false) {
     if (running) return;
@@ -1018,13 +1020,13 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.3";
+    title.textContent = "Stove Daily Companion · 1.0.4";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
       location.hostname === "lostark.game.onstove.com"
         ? "시작하면 새 뽑기 탭에서 일괄 처리를 진행합니다."
-        : "보상을 받은 뒤 현재 탭에서 뽑습니다.";
+        : "출석·미션 수령과 현재 탭 뽑기를 동시에 진행합니다.";
     summary.style.margin = "6px 0";
     panel.append(summary);
     modeSelect = { value: "100" };

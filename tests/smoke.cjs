@@ -162,28 +162,32 @@ function drawFixture(
     assert.equal(calls.filter((id) => id === "mission3").length, 1);
     f.close();
   });
-  await test("출석 2개는 직렬 / 미션은 병렬 / 모두 끝난 뒤 뽑기", async () => {
+  await test("뽑기·미션·출석 동시 시작 / 모든 작업 완료까지 대기", async () => {
     const f = fixture(),
       started = [],
       releases = [];
     const pending = f.h.runPlan(false, "100", f.h.today(), (task) => {
       started.push(task.id);
-      return task.draw
-        ? Promise.resolve()
-        : new Promise((resolve) => releases.push(resolve));
+      return new Promise((resolve) => releases.push(resolve));
     });
-    assert.deepEqual(started, ["riichi", "missions"]);
+    let finished = false;
+    pending.then(() => {
+      finished = true;
+    });
+    assert.deepEqual(started, ["riichi", "missions", "draw"]);
     releases[0]();
     await new Promise(setImmediate);
-    assert.deepEqual(started, ["riichi", "missions", "indie"]);
-    assert(!started.includes("draw"));
+    assert.deepEqual(started, ["riichi", "missions", "draw", "indie"]);
     releases[1]();
     releases[2]();
+    await new Promise(setImmediate);
+    assert.equal(finished, false);
+    releases[3]();
     await pending;
-    assert.equal(started.at(-1), "draw");
+    assert.equal(finished, true);
     f.close();
   });
-  await test("병렬 처리 중 중단하면 뽑기 시작 금지", async () => {
+  await test("병렬 처리 중 중단하면 후속 출석 시작 금지", async () => {
     const f = fixture(),
       started = [],
       releases = [];
@@ -194,7 +198,29 @@ function drawFixture(
     f.h.stop();
     releases.forEach((resolve) => resolve());
     await assert.rejects(pending, /중단됨/);
-    assert(!started.includes("draw"));
+    assert(started.includes("draw"));
+    assert(!started.includes("indie"));
+    f.close();
+  });
+  await test("뽑기 실패 시 다른 보상 작업이 끝날 때까지 대기", async () => {
+    const f = fixture(),
+      releases = [];
+    let ended = false;
+    const pending = f.h.runPlan(false, "100", f.h.today(), (task) => {
+      if (task.draw) return Promise.reject(new Error("뽑기 오류"));
+      return new Promise((resolve) => releases.push(resolve));
+    });
+    const checked = assert.rejects(pending, /뽑기 오류/).then(() => {
+      ended = true;
+    });
+    await new Promise(setImmediate);
+    assert.equal(ended, false);
+    releases[0]();
+    await new Promise(setImmediate);
+    releases[1]();
+    assert.equal(ended, false);
+    releases[2]();
+    await checked;
     f.close();
   });
   await test("한 미션 탭에서 5개 수령 직렬 처리 및 결과 전달", async () => {
