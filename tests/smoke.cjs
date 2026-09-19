@@ -10,7 +10,7 @@ const entry = code.lastIndexOf("if (document.readyState");
 if (entry < 0) throw new Error("Initialization entry not found");
 code =
   code.slice(0, entry) +
-  "globalThis.h={init,start,stop,today,runPlan,runMissionBatch,month,runDraw,claim,runShop,runMission,shopButton,missionButton,drawCount,closeOfferwall,parseFlakes,totals,history,executeTask,status,retryTask};})();";
+  "globalThis.h={init,start,stop,today,runPlan,runMissionBatch,month,runDraw,claim,runShop,runMilestones,runMission,shopButton,missionButton,drawCount,closeOfferwall,parseFlakes,totals,history,executeTask,status,retryTask};})();";
 let passed = 0;
 function fixture(html = "", options = {}) {
   const dom = new JSDOM(html, {
@@ -556,7 +556,7 @@ function drawFixture(
   await test("출석 일시 오류 후 1회 갱신 확인 / 재클릭 금지", async () => {
     for (const completed of [true, false]) {
       const f = fixture(
-        '<div class="module-card-item"><span>9.5</span><button>오늘의 아이템 받기</button></div>',
+        '<div class="module-card-item"><span>9.5</span><button>오늘의 아이템 받기</button></div><li id="cumulative-1"><button disabled>완료</button></li>',
         {
           url: "https://event.onstove.com/ko/dailyshop/STOVEINDIE/202609#stoveDaily=shop",
         },
@@ -589,9 +589,86 @@ function drawFixture(
   });
   await test("오늘 출석 카드만 완료 판정", async () => {
     const f = fixture(
-      '<div class="module-card-item"><span>9.4</span><button>오늘의 아이템 받기</button></div><div class="module-card-item"><span>9.5</span><button disabled>완료</button></div>',
+      '<div class="module-card-item"><span>9.4</span><button>오늘의 아이템 받기</button></div><div class="module-card-item"><span>9.5</span><button disabled>완료</button></div><li id="cumulative-1"><button disabled>완료</button></li>',
     );
     assert.equal((await f.h.runShop({})).state, "완료됨");
+    f.close();
+  });
+  await test("오늘 출석 완료여도 누적 보상 수령 / 조건 미달과 응모 제외", async () => {
+    const f = fixture(
+      '<div class="module-card-item"><span>9.5</span><button disabled>완료</button></div><li id="cumulative-1">5일 누적 쿠폰<button>보상받기</button></li><li id="cumulative-2"><button disabled>보상받기</button></li><button id="raffle">응모하기</button>',
+    );
+    let clicks = 0;
+    f.doc.querySelector("#cumulative-1 button").onclick = (e) => {
+      clicks++;
+      e.target.textContent = "완료";
+      e.target.disabled = true;
+    };
+    f.doc.querySelector("#raffle").onclick = () => {
+      throw Error("응모 클릭 금지");
+    };
+    const value = await f.h.runShop({});
+    assert.equal(value.state, "완료됨");
+    assert(value.detail.includes("누적 보상 1개 수령"));
+    await f.h.runShop({});
+    assert.equal(clicks, 1);
+    f.close();
+  });
+  await test("누적 보상 스캔은 클릭 없이 수령 가능 표시", async () => {
+    const f = fixture('<li id="cumulative-1"><button>보상받기</button></li>');
+    f.doc.querySelector("button").onclick = () => {
+      throw Error("스캔 클릭 금지");
+    };
+    assert.equal((await f.h.runMilestones("shop", true)).state, "수령 가능");
+    f.close();
+  });
+  await test("누적 보상 오류는 재클릭 없이 확인 필요", async () => {
+    const f = fixture('<li id="cumulative-1"><button>보상받기</button></li>');
+    let clicks = 0;
+    f.doc.querySelector("button").onclick = () => {
+      clicks++;
+      f.doc.body.insertAdjacentHTML(
+        "beforeend",
+        '<div class="stds-dialog-panel">일시적인 오류</div>',
+      );
+    };
+    assert.equal((await f.h.runMilestones("shop")).state, "확인 필요");
+    assert.equal(clicks, 1);
+    f.close();
+  });
+  await test("캡슐 30회 완료 후 누적 보상 수령 / 결과 창 닫기 / 재수령 방지", async () => {
+    const f = fixture(
+      '<div class="stds-box">오늘 뽑기 30/30회</div><div><div><button id="bonus">5,000 플레이크 받기</button></div><p>30번<span class="l1l2-flakehub-common-draw_condition">x10</span> 이상 뽑기 시</p></div><div class="stds-dialog-panel"><span class="l1l2-flakehub-popup-common-received_reward">100 플레이크</span><button id="close">닫기</button></div>',
+    );
+    f.h.init();
+    let clicks = 0;
+    f.doc.querySelector("#close").onclick = () =>
+      f.doc.querySelector(".stds-dialog-panel").remove();
+    f.doc.querySelector("#bonus").onclick = (e) => {
+      clicks++;
+      e.target.textContent = "플레이크 받기 완료";
+      e.target.disabled = true;
+      const modal = f.doc.createElement("div");
+      modal.className = "stds-dialog-panel";
+      modal.innerHTML = "5,000 플레이크가 지급되었습니다!<button>확인</button>";
+      modal.querySelector("button").onclick = () => modal.remove();
+      f.doc.body.append(modal);
+    };
+    await f.h.executeTask(
+      { id: "draw", name: "캡슐 뽑기", draw: true },
+      false,
+      "100",
+    );
+    assert.equal(clicks, 1);
+    assert(!f.doc.querySelector(".stds-dialog-panel"));
+    assert.equal((await f.h.runMilestones("draw")).state, "완료됨");
+    assert.equal(clicks, 1);
+    f.close();
+  });
+  await test("누적 영역 누락은 완료로 처리하지 않음", async () => {
+    const f = fixture("<button>보상받기</button>");
+    assert.equal((await f.h.runMilestones("shop")).state, "확인 필요");
+    assert.equal((await f.h.runMilestones("draw")).state, "확인 필요");
     f.close();
   });
   await test("미션 스캔은 수령하지 않음", async () => {

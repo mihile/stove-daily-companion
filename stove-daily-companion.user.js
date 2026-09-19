@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.5
+// @version      1.0.6
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -353,7 +353,130 @@
         : "앱 로그인/게임 플레이 후 다시 실행하세요.",
     );
   }
+  function milestoneCards(kind) {
+    if (kind === "shop")
+      return [...document.querySelectorAll('li[id^="cumulative-"]')].filter(
+        visible,
+      );
+    return [
+      ...document.querySelectorAll(".l1l2-flakehub-common-draw_condition"),
+    ]
+      .filter(visible)
+      .map((label) => {
+        for (
+          let el = label.parentElement;
+          el && el !== document.body;
+          el = el.parentElement
+        ) {
+          if (buttons(el).length === 1) return el;
+          if (buttons(el).length > 1) return null;
+        }
+        return null;
+      })
+      .filter(Boolean);
+  }
+  function milestoneButton(card) {
+    if (!card) return null;
+    return buttons(card).find((b) =>
+      /^(보상받기|완료|받기완료|수령완료|플레이크받기완료|[\d,]+플레이크받기)$/.test(
+        text(b),
+      ),
+    );
+  }
+  const milestoneDone = (b) => done(b) || text(b) === "플레이크받기완료";
+  async function runMilestones(kind, scan = false) {
+    const cards = await waitFor(() => {
+      const found = milestoneCards(kind);
+      return found.length ? found : null;
+    }, 10000);
+    if (!cards) return result("확인 필요", "누적 보상 영역을 찾지 못했습니다.");
+    let received = 0,
+      available = 0;
+    const names = [];
+    for (let index = 0; index < cards.length; index++) {
+      check();
+      const read = () => milestoneButton(milestoneCards(kind)[index]);
+      const b = read();
+      if (!b)
+        return result("확인 필요", "누적 보상 버튼을 확인할 수 없습니다.");
+      if (milestoneDone(b) || !enabled(b)) continue;
+      available++;
+      if (scan) continue;
+      const name = (cards[index].innerText || cards[index].textContent)
+        .replace(/\s+/g, " ")
+        .trim();
+      const drawPopup = kind === "draw" ? rewardView() : null;
+      if (drawPopup) {
+        const close = buttons(drawPopup.panel).find(
+          (el) => text(el) === "닫기",
+        );
+        if (!enabled(close))
+          return result("확인 필요", "뽑기 결과 창을 닫고 재시도하세요.");
+        close.click();
+        if (!(await waitFor(() => !rewardView(), 5000)))
+          return result("확인 필요", "뽑기 결과 창 닫기 실패");
+      }
+      if (dialogs().length)
+        return result("확인 필요", "누적 보상 안내 창을 확인하세요.");
+      check();
+      const current = read();
+      if (milestoneDone(current) || !enabled(current)) continue;
+      current.click();
+      let response = await waitFor(() => {
+        const info = inspectModal();
+        if (info) return info;
+        return milestoneDone(read()) ? { success: true } : null;
+      }, 15000);
+      // 완료 버튼보다 수령 안내 애니메이션이 늦게 나타나는 경우도 기다린다.
+      if (response?.success && !response.modal)
+        response = (await waitFor(inspectModal, 750)) || response;
+      if (!response?.success)
+        return result(
+          "확인 필요",
+          response?.message || "누적 보상 수령 결과 미확인",
+        );
+      if (response.modal) {
+        const close = buttons(response.modal).find((el) =>
+          /^(확인|닫기)$/.test(text(el)),
+        );
+        if (!enabled(close))
+          return result("확인 필요", "누적 보상 안내 창을 닫아주세요.");
+        check();
+        close.click();
+        if (!(await waitFor(() => !visible(response.modal), 5000)))
+          return result("확인 필요", "누적 보상 안내 창 닫기 실패");
+      }
+      if (!(await waitFor(() => milestoneDone(read()), 5000)))
+        return result("확인 필요", "누적 보상 완료 표시 미확인");
+      received++;
+      names.push(name);
+    }
+    return result(
+      scan && available ? "수령 가능" : "완료됨",
+      scan && available
+        ? `누적 보상 ${available}개 수령 가능`
+        : received
+          ? `누적 보상 ${received}개 수령 · ${names.join(" / ")}`
+          : "받을 누적 보상 없음",
+    );
+  }
+  function withMilestones(base, bonus) {
+    return result(
+      base.state === "확인 필요" || bonus.state === "확인 필요"
+        ? "확인 필요"
+        : bonus.state === "수령 가능"
+          ? "수령 가능"
+          : base.state,
+      `${base.detail} · ${bonus.detail}`,
+    );
+  }
   async function runShop(job, reload = () => location.reload()) {
+    const daily = await runShopDaily(job, reload);
+    if (!daily) return null;
+    const bonus = await runMilestones("shop", job.scan);
+    return withMilestones(daily, bonus);
+  }
+  async function runShopDaily(job, reload = () => location.reload()) {
     const b = await waitFor(shopButton);
     if (!b)
       return result("확인 필요", "오늘 날짜 출석 카드를 찾지 못했습니다.");
@@ -745,7 +868,8 @@
   }
   async function executeTask(task, scan, mode) {
     if (task.draw) {
-      const value = await runDraw({ scan, mode });
+      const draw = await runDraw({ scan, mode });
+      const value = withMilestones(draw, await runMilestones("draw", scan));
       status(task.id, value);
       log(`${task.name}: ${value.state} — ${value.detail}`);
       return;
@@ -776,7 +900,8 @@
         insert: true,
         setParent: true,
       });
-      const end = Date.now() + (task.id === "missions" ? 120000 : 75000);
+      const end =
+        Date.now() + (task.id === "missions" || task.game ? 120000 : 75000);
       while (Date.now() < end) {
         check();
         const current = GM_getValue(key, null);
@@ -1020,7 +1145,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.5";
+    title.textContent = "Stove Daily Companion · 1.0.6";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
