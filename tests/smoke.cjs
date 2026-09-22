@@ -10,8 +10,25 @@ const entry = code.lastIndexOf("if (document.readyState");
 if (entry < 0) throw new Error("Initialization entry not found");
 code =
   code.slice(0, entry) +
-  "globalThis.h={init,start,stop,today,runPlan,runMissionBatch,month,runDraw,claim,runShop,runMilestones,runMission,shopButton,missionButton,drawCount,closeOfferwall,parseFlakes,totals,history,executeTask,status,retryTask};})();";
+  "globalThis.h={init,start,stop,today,runPlan,runMissionBatch,month,runDraw,claim,runShop,runMilestones,runMission,shopButton,missionButton,drawCount,closeOfferwall,parseFlakes,totals,history,executeTask,status,retryTask,discoverClickMissions,syncMissionCatalog,failedTasks};})();";
 let passed = 0;
+function missionHTML(names, button = "받기") {
+  return (
+    '<div id="mission-widget-349"><span>클릭하고 매일 보상받기!</span>' +
+    names
+      .slice(0, 3)
+      .map(
+        (name) =>
+          `<div class="stds-box"><p>${name}</p><p>방문 보상 안내</p><button>${button}</button></div>`,
+      )
+      .join("") +
+    "</div>" +
+    names
+      .slice(3)
+      .map((name) => `<div><p>${name}</p><button>${button}</button></div>`)
+      .join("")
+  );
+}
 function fixture(html = "", options = {}) {
   const dom = new JSDOM(html, {
       url: options.url || "https://reward.onstove.com/ko/event",
@@ -133,12 +150,9 @@ function drawFixture(
       "스토브 앱 로그인하기",
       "게임 플레이하기",
     ];
-    const f = fixture(
-      names
-        .map((n) => `<div><p>${n}</p><button>미션하기</button></div>`)
-        .join(""),
-      { url: "https://reward.onstove.com/ko#stoveDaily=batch" },
-    );
+    const f = fixture(missionHTML(names, "미션하기"), {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
     const job = { owner: "owner", date: f.h.today(), task: "missions" };
     f.store.set("stove_daily_v2:batch", job);
     f.store.set("stove_daily_v2:lock", { id: "owner", time: f.w.Date.now() });
@@ -231,10 +245,9 @@ function drawFixture(
       "스토브 앱 로그인하기",
       "게임 플레이하기",
     ];
-    const f = fixture(
-      names.map((n) => `<div><p>${n}</p><button>받기</button></div>`).join(""),
-      { url: "https://reward.onstove.com/ko#stoveDaily=batch" },
-    );
+    const f = fixture(missionHTML(names), {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
     const job = {
       owner: "owner",
       date: f.h.today(),
@@ -264,6 +277,149 @@ function drawFixture(
         (v) => v.state === "완료됨",
       ).length,
       5,
+    );
+    f.close();
+  });
+  await test("클릭 보상 자동 발견과 외부 영역 제외 / 신규 항목 수령 / 없어진 게임 미션", async () => {
+    const names = [
+      "다양한 게임 보러가기",
+      "MY홈 방문하기",
+      "스토브 메인 방문하기",
+      "오늘의 1등 미리보기",
+      "이클립스 공식 홈페이지 방문하기",
+    ];
+    const html =
+      '<div id="mission-widget-999"><span>클릭하고 매일 보상받기!</span>' +
+      names
+        .map(
+          (name) =>
+            `<div class="stds-box"><p>${name}</p><p>안내</p><button>받기</button></div>`,
+        )
+        .join("") +
+      '</div><div><p>스토브 앱 로그인하기</p><button>받기</button></div><div class="stds-box"><p>경품 응모하기</p><button id="outside">미션하기</button></div>';
+    const f = fixture(html, {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
+    const job = { owner: "owner", date: f.h.today(), task: "missions" };
+    f.store.set("stove_daily_v2:batch", job);
+    f.store.set("stove_daily_v2:lock", { id: "owner", time: f.w.Date.now() });
+    let clicks = 0;
+    for (const b of f.doc.querySelectorAll("button"))
+      b.onclick = () => {
+        assert.notEqual(b.id, "outside");
+        clicks++;
+        b.textContent = "받기 완료";
+      };
+    assert.equal(f.h.discoverClickMissions().length, 5);
+    await f.h.runMissionBatch(job);
+    const saved = f.store.get("stove_daily_v2:batch");
+    assert.equal(saved.catalog.length, 5);
+    assert.equal(saved.items.mission4.state, "탐지 안 됨");
+    assert.equal(
+      Object.values(saved.items).filter((x) => x.state === "완료됨").length,
+      6,
+    );
+    assert.equal(clicks, 6);
+    f.close();
+  });
+  await test("동적 클릭 목록은 개수·완료·남음·실패를 표시하고 누락은 실패와 구분", () => {
+    const f = fixture();
+    f.h.init();
+    const catalog = [
+      {
+        id: "mission0",
+        name: "다양한 게임 보러가기",
+        mission: true,
+        visit: true,
+      },
+      {
+        id: "click:new",
+        name: "새 방문 미션",
+        mission: true,
+        visit: true,
+        dynamic: true,
+      },
+    ];
+    f.h.syncMissionCatalog(catalog);
+    f.h.status("mission0", { state: "완료됨" });
+    f.h.status("click:new", { state: "확인 필요" });
+    f.h.status("mission4", { state: "탐지 안 됨" });
+    const report = f.doc.querySelector(
+      "#stove-daily-click-summary",
+    ).textContent;
+    assert(report.includes("클릭 보상 2개"));
+    assert(report.includes("수령 완료 1"));
+    assert(report.includes("남음 1"));
+    assert(report.includes("재시도 1"));
+    assert.equal(
+      f.doc.querySelector("#stove-daily-click-grid").children.length,
+      2,
+    );
+    assert.equal(f.h.failedTasks().length, 1);
+    assert(
+      [...f.doc.querySelectorAll("button")].some(
+        (b) => b.textContent === "실패 항목 다시 받기",
+      ),
+    );
+    f.close();
+  });
+  await test("메인 일괄 재시도는 실패 두 건만 실행 / 완료 뽑기와 탐지 안 됨 제외", async () => {
+    const f = fixture();
+    f.h.init();
+    f.h.status("riichi", { state: "확인 필요" });
+    f.h.status("indie", { state: "확인 필요" });
+    f.h.status("draw", { state: "완료됨" });
+    f.h.status("mission4", { state: "탐지 안 됨" });
+    const calls = [];
+    f.w.GM_openInTab = (url) => {
+      const id = new URL(url).hash.split("=")[1];
+      const key = "stove_daily_v2:" + id;
+      const job = f.store.get(key);
+      calls.push(job.task);
+      f.store.set(key, {
+        ...job,
+        result: { state: "완료됨", detail: "완료 확인" },
+      });
+      return { close() {}, closed: false };
+    };
+    const main = [...f.doc.querySelectorAll("button")].find(
+      (b) => b.textContent === "실패 항목 다시 받기",
+    );
+    await main.onclick();
+    assert.deepEqual(calls, ["riichi", "indie"]);
+    assert.equal(main.textContent, "일일 보상 한 번에 받기");
+    assert.equal(f.h.failedTasks().length, 0);
+    f.close();
+  });
+  await test("일괄 재시도 중 중단하면 다음 실패 항목은 실행하지 않음", async () => {
+    const f = fixture();
+    f.h.init();
+    f.h.status("riichi", { state: "확인 필요" });
+    f.h.status("indie", { state: "확인 필요" });
+    const calls = [];
+    await f.h.retryTask(["riichi", "indie"], async (task) => {
+      calls.push(task.id);
+      f.h.stop();
+      return { state: "완료됨" };
+    });
+    assert.deepEqual(calls, ["riichi"]);
+    assert.equal(f.h.failedTasks().length, 1);
+    f.close();
+  });
+  await test("미션 수령 성공 안내만 있고 완료 표시가 없으면 재시도 필요", async () => {
+    const f = fixture(
+      "<div><p>스토브 앱 로그인하기</p><button>받기</button></div>",
+    );
+    f.doc.querySelector("button").onclick = () => {
+      const modal = f.doc.createElement("div");
+      modal.className = "stds-dialog-panel";
+      modal.innerHTML = "지급되었습니다<button>확인</button>";
+      modal.querySelector("button").onclick = () => modal.remove();
+      f.doc.body.append(modal);
+    };
+    assert.equal(
+      (await f.h.runMission({ name: "스토브 앱 로그인하기" }, {})).state,
+      "확인 필요",
     );
     f.close();
   });
