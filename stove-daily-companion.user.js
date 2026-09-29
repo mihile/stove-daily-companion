@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.7
+// @version      1.0.8
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
 // @description  스토브 일일 보상 확인·수령과 현재 탭 캡슐 뽑기 및 결과 기록
 // @match        https://reward.onstove.com/ko*
 // @match        https://lostark.game.onstove.com/News/Notice/*
+// @match        https://lostark.game.onstove.com/Inspection/*
 // @match        https://event.onstove.com/ko/dailyshop/RIICHICITY_IND/*
 // @match        https://event.onstove.com/ko/dailyshop/STOVEINDIE/*
 // @grant        GM_getValue
@@ -1257,12 +1258,14 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.7";
+    title.textContent = "Stove Daily Companion · 1.0.8";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
       location.hostname === "lostark.game.onstove.com"
-        ? "시작하면 새 뽑기 탭에서 일괄 처리를 진행합니다."
+        ? location.pathname.startsWith("/Inspection/")
+          ? "로스트아크 점검 중 · 보상은 새 뽑기 탭에서 진행합니다."
+          : "시작하면 새 뽑기 탭에서 일괄 처리를 진행합니다."
         : "출석·미션 수령과 현재 탭 뽑기를 동시에 진행합니다.";
     summary.style.margin = "6px 0";
     panel.append(summary);

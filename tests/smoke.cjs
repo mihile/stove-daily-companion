@@ -7,6 +7,7 @@ let code = fs.readFileSync(
   "utf8",
 );
 const entry = code.lastIndexOf("if (document.readyState");
+const matches = [...code.matchAll(/^\/\/ @match\s+(\S+)/gm)].map((m) => m[1]);
 if (entry < 0) throw new Error("Initialization entry not found");
 code =
   code.slice(0, entry) +
@@ -443,6 +444,47 @@ function drawFixture(
     assert.equal(f.store.get(key).mode, "1000");
     assert.equal(f.store.get(key).scan, false);
     assert.equal(f.w.location.hostname, "lostark.game.onstove.com");
+    f.close();
+  });
+  await test("로스트아크 점검 주소에서도 패널 표시와 선택 금액 전달", async () => {
+    const url = "https://lostark.game.onstove.com/Inspection/Information";
+    assert(
+      matches.some((pattern) =>
+        new RegExp(
+          "^" +
+            pattern
+              .split("*")
+              .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+              .join(".*") +
+            "$",
+        ).test(url),
+      ),
+    );
+    const f = fixture("<h3>서비스 점검 중 입니다.</h3>", {
+      url,
+      store: new Map([["stove_daily_v2:drawMode", "1000"]]),
+    });
+    f.w.setTimeout = () => {};
+    let opened;
+    f.w.GM_openInTab = (tabUrl, options) => {
+      opened = { url: tabUrl, options };
+    };
+    f.h.init();
+    assert(f.doc.querySelector("#stove-daily-extension"));
+    assert(f.doc.body.textContent.includes("로스트아크 점검 중"));
+    const button = [...f.doc.querySelectorAll("button")].find(
+      (b) => b.textContent === "일일 보상 한 번에 받기",
+    );
+    await button.onclick();
+    assert(
+      opened.url.startsWith("https://reward.onstove.com/ko/event#stoveLaunch="),
+    );
+    assert.equal(opened.options.active, true);
+    const request = f.store.get(
+      "stove_daily_v2:launch:" + opened.url.split("=")[1],
+    );
+    assert.equal(request.mode, "1000");
+    assert.equal(f.w.location.href, url);
     f.close();
   });
   await test("기존 실행 중에는 공지사항에서 중복 탭 생성 금지", async () => {
