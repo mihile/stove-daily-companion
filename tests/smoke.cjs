@@ -30,6 +30,26 @@ function missionHTML(names, button = "받기") {
       .join("")
   );
 }
+function octoberMissions(button = "받기") {
+  const names = [
+    "오늘의 1등 참여하기",
+    "스토어 온라인 게임관 방문하기",
+    "스토브 메인 방문하기",
+    "앱 미니게임 플레이하기",
+    "스토브 앱 로그인하기",
+    "경품 응모하기",
+  ];
+  return (
+    '<div id="mission-widget-377"><span>데일리 미션 참여하고 매일 보상받기!</span>' +
+    names
+      .map(
+        (name) =>
+          `<div class="stds-box"><p>${name}</p><p>${name} 미션 조건</p><button>${button}</button></div>`,
+      )
+      .join("") +
+    "</div>"
+  );
+}
 function fixture(html = "", options = {}) {
   const dom = new JSDOM(html, {
       url: options.url || "https://reward.onstove.com/ko/event",
@@ -348,7 +368,7 @@ function drawFixture(
     const report = f.doc.querySelector(
       "#stove-daily-click-summary",
     ).textContent;
-    assert(report.includes("클릭 보상 2개"));
+    assert(report.includes("일일 미션 2개"));
     assert(report.includes("수령 완료 1"));
     assert(report.includes("남음 1"));
     assert(report.includes("재시도 1"));
@@ -421,6 +441,154 @@ function drawFixture(
     assert.equal(
       (await f.h.runMission({ name: "스토브 앱 로그인하기" }, {})).state,
       "확인 필요",
+    );
+    f.close();
+  });
+  await test("10월 통합 데일리 목록 탐지 / 방문과 직접 참여 조건 구분", () => {
+    const f = fixture(
+      octoberMissions("미션하기") +
+        '<div id="mission-widget-380"><span>위클리 미션 참여하고 보상받기!</span><div class="stds-box"><p>매일 스토브 앱 로그인하기</p><button>미션하기</button></div></div>',
+    );
+    const catalog = f.h.discoverClickMissions();
+    assert.equal(catalog.length, 6);
+    assert.deepEqual(
+      Array.from(
+        catalog.filter((t) => t.visit),
+        (t) => t.name,
+      ),
+      ["스토어 온라인 게임관 방문하기", "스토브 메인 방문하기"],
+    );
+    f.close();
+  });
+  await test("새 목록 스캔 시 사라진 옛 미션은 즉시 탐지 안 됨 / 10초 대기 없음", async () => {
+    const f = fixture(octoberMissions(), {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
+    const job = {
+      owner: "owner",
+      date: f.h.today(),
+      task: "missions",
+      scan: true,
+    };
+    f.store.set("stove_daily_v2:batch", job);
+    f.store.set("stove_daily_v2:lock", { id: "owner", time: f.w.Date.now() });
+    const began = f.w.Date.now();
+    await f.h.runMissionBatch(job);
+    const saved = f.store.get("stove_daily_v2:batch");
+    assert.equal(saved.catalog.length, 6);
+    assert.equal(saved.items.mission0.state, "탐지 안 됨");
+    assert.equal(saved.items.mission1.state, "탐지 안 됨");
+    assert.equal(saved.items.mission2.state, "수령 가능");
+    assert(f.w.Date.now() - began < 1000);
+    f.close();
+  });
+  await test("개별 확인에서도 없는 미션은 로딩 완료 즉시 판정", async () => {
+    const f = fixture(octoberMissions());
+    const began = f.w.Date.now();
+    assert.equal(
+      (await f.h.runMission({ name: "다양한 게임 보러가기", visit: true }, {}))
+        .state,
+      "탐지 안 됨",
+    );
+    assert(f.w.Date.now() - began < 1000);
+    f.close();
+  });
+  await test("묶음 재시도는 선택한 미션만 수령하고 다른 받기 버튼은 유지", async () => {
+    const f = fixture(octoberMissions(), {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
+    const catalog = f.h.discoverClickMissions();
+    const selectedTasks = catalog.filter((t) => t.visit);
+    const job = {
+      owner: "owner",
+      date: f.h.today(),
+      task: "missions",
+      selectedTasks,
+    };
+    f.store.set("stove_daily_v2:batch", job);
+    f.store.set("stove_daily_v2:lock", { id: "owner", time: f.w.Date.now() });
+    const clicks = [];
+    for (const card of f.doc.querySelectorAll(".stds-box"))
+      card.querySelector("button").onclick = (e) => {
+        clicks.push(card.querySelector("p").textContent);
+        e.target.textContent = "받기 완료";
+      };
+    await f.h.runMissionBatch(job);
+    assert.deepEqual(clicks, [
+      "스토어 온라인 게임관 방문하기",
+      "스토브 메인 방문하기",
+    ]);
+    assert.equal(
+      Object.keys(f.store.get("stove_daily_v2:batch").items).length,
+      2,
+    );
+    assert.equal(f.h.missionButton("스토브 앱 로그인하기").textContent, "받기");
+    f.close();
+  });
+  await test("일괄 미션 재시도는 작업 탭 한 개 / 완료 출석과 뽑기 제외", async () => {
+    const f = fixture();
+    f.h.init();
+    f.h.status("mission0", { state: "확인 필요" });
+    f.h.status("mission2", { state: "확인 필요" });
+    f.h.status("draw", { state: "완료됨" });
+    const opened = [];
+    f.w.GM_openInTab = (url) => {
+      const key = "stove_daily_v2:" + new URL(url).hash.split("=")[1];
+      const job = f.store.get(key);
+      opened.push(job);
+      assert.equal(job.task, "missions");
+      assert.deepEqual(
+        job.selectedTasks.map((t) => t.id),
+        ["mission0", "mission2"],
+      );
+      f.store.set(key, {
+        ...job,
+        items: {
+          mission0: { state: "탐지 안 됨" },
+          mission2: { state: "완료됨" },
+        },
+        result: { state: "처리 종료" },
+      });
+      return { closed: false, close() {} };
+    };
+    await f.h.retryTask(["mission0", "mission2"]);
+    assert.equal(opened.length, 1);
+    assert.equal(f.h.failedTasks().length, 0);
+    f.close();
+  });
+  await test("묶음 재시도 방문 후 새로고침은 한 번 / 완료 항목 재방문 금지", async () => {
+    const f = fixture(octoberMissions("미션하기"), {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
+    const selectedTasks = f.h.discoverClickMissions().filter((t) => t.visit);
+    const job = {
+      owner: "owner",
+      date: f.h.today(),
+      task: "missions",
+      selectedTasks,
+    };
+    f.store.set("stove_daily_v2:batch", job);
+    f.store.set("stove_daily_v2:lock", { id: "owner", time: f.w.Date.now() });
+    let reloads = 0;
+    const calls = [];
+    const perform = async (task, context) => {
+      calls.push(task.id);
+      return { state: context.visited ? "완료됨" : "갱신 대기" };
+    };
+    assert.equal(
+      await f.h.runMissionBatch(job, perform, () => reloads++),
+      null,
+    );
+    await f.h.runMissionBatch(
+      f.store.get("stove_daily_v2:batch"),
+      perform,
+      () => reloads++,
+    );
+    assert.equal(reloads, 1);
+    assert.equal(calls.length, 4);
+    assert.equal(
+      Object.keys(f.store.get("stove_daily_v2:batch").items).length,
+      2,
     );
     f.close();
   });

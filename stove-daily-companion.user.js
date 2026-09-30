@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.8
+// @version      1.0.9
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -183,8 +183,8 @@
       (t) => rows.get(t.id)?.value?.state === "확인 필요",
     ).length;
     clickSummary.textContent = clickTasks.length
-      ? `클릭 보상 ${clickTasks.length}개 · 수령 완료 ${completed} · 남음 ${clickTasks.length - completed} · 재시도 ${failed}`
-      : "클릭 보상 · 실행 시 목록 확인";
+      ? `일일 미션 ${clickTasks.length}개 · 수령 완료 ${completed} · 남음 ${clickTasks.length - completed} · 재시도 ${failed}`
+      : "일일 미션 · 실행 시 목록 확인";
   }
   function syncMissionCatalog(catalog) {
     clickTasks = catalog;
@@ -201,28 +201,35 @@
     updateMissionSummary();
   }
   function discoverClickMissions() {
-    const root = [...document.querySelectorAll('[id^="mission-widget-"]')].find(
+    const roots = [
+      ...document.querySelectorAll('[id^="mission-widget-"]'),
+    ].filter(
       (el) =>
         visible(el) &&
-        [...el.querySelectorAll("span")].some(
-          (label) => text(label) === "클릭하고매일보상받기!",
+        [...el.querySelectorAll("span")].some((label) =>
+          /^(클릭하고매일보상받기!?|데일리미션.*보상받기!?)$/.test(text(label)),
         ),
     );
-    if (!root) return null;
+    if (!roots.length) return null;
     const tasks = [];
-    for (const card of [...root.querySelectorAll(".stds-box")].filter(
-      visible,
-    )) {
+    for (const card of roots
+      .flatMap((root) => [...root.querySelectorAll(".stds-box")])
+      .filter(visible)) {
       if (buttons(card).length !== 1) continue;
       const label = [...card.querySelectorAll("p")].find(visible);
       const name = label?.textContent.trim();
       if (!name || tasks.some((t) => t.name === name)) continue;
       const known = TASKS.find((t) => t.mission && t.name === name);
+      const description = [...card.querySelectorAll("p")]
+        .filter(visible)
+        .slice(1)
+        .map((el) => el.textContent)
+        .join(" ");
       tasks.push({
         id: known?.id || "click:" + encodeURIComponent(name),
         name,
         mission: true,
-        visit: true,
+        visit: /방문|구경|보러가기|미리보기/.test(name + " " + description),
         dynamic: !known || !!known.dynamic,
         clickReward: true,
       });
@@ -392,8 +399,16 @@
     if (!(await closeOfferwall()))
       return result("확인 필요", "게임 목록 팝업 닫기 실패");
     const read = () => missionButton(task.name),
-      b = job.catalogReady ? read() : await waitFor(read);
-    if (!b) return result("탐지 안 됨", "현재 페이지에 이 미션이 없습니다.");
+      b = job.catalogReady
+        ? read()
+        : await waitFor(
+            () =>
+              read() ||
+              (discoverClickMissions() !== null ? { missing: true } : null),
+            10000,
+          );
+    if (!b || b.missing)
+      return result("탐지 안 됨", "현재 페이지에 이 미션이 없습니다.");
     if (done(b)) return result("완료됨", "받기 완료 확인 · 건너뜀");
     if (job.scan)
       return result(
@@ -428,7 +443,7 @@
       task.visit ? "확인 필요" : "조건 미충족",
       task.visit
         ? "방문 후 새로고침했지만 받기로 바뀌지 않았습니다."
-        : "앱 로그인/게임 플레이 후 다시 실행하세요.",
+        : "사이트에서 미션 조건을 충족한 뒤 다시 확인하세요.",
     );
   }
   function milestoneCards(kind) {
@@ -590,15 +605,19 @@
     perform = runMission,
     reload = () => location.reload(),
   ) {
-    await waitFor(() => discoverClickMissions()?.length, 10000);
+    await waitFor(discoverClickMissions, 10000);
     const catalog = discoverClickMissions();
-    const missions = [...TASKS.filter((t) => t.mission && !t.dynamic)];
+    const missions = job.selectedTasks
+      ? job.selectedTasks.map(
+          (task) => catalog?.find((current) => current.id === task.id) || task,
+        )
+      : [...TASKS.filter((t) => t.mission && !t.dynamic)];
     for (const task of catalog || []) {
       const index = missions.findIndex((t) => t.id === task.id);
-      if (index < 0) missions.push(task);
-      else missions[index] = task;
+      if (index < 0 && !job.selectedTasks) missions.push(task);
+      else if (index >= 0) missions[index] = task;
     }
-    for (const old of job.catalog || [])
+    for (const old of job.selectedTasks ? [] : job.catalog || [])
       if (!missions.some((t) => t.id === old.id)) missions.push(old);
     const items = { ...(job.items || {}) };
     const visited = { ...(job.visitedItems || {}) };
@@ -618,7 +637,7 @@
       if (catalog === null && task.visit) {
         items[task.id] = result(
           "확인 필요",
-          "클릭 보상 목록을 불러오지 못했습니다. 로그인 상태를 확인하고 재시도하세요.",
+          "일일 미션 목록을 불러오지 못했습니다. 로그인 상태를 확인하고 재시도하세요.",
         );
         save();
         continue;
@@ -658,7 +677,7 @@
       Object.values(items).some((v) => v.state === "확인 필요")
         ? "확인 필요"
         : "처리 종료",
-      `클릭 보상 ${catalog?.length || 0}개 · 미션 ${missions.length}개 확인 종료`,
+      `일일 미션 ${catalog?.length || 0}개 · 대상 ${missions.length}개 확인 종료`,
     );
   }
   async function runDraw(job) {
@@ -984,6 +1003,7 @@
       owner: leaseId,
       task: task.id,
       missionTask: task.mission ? task : undefined,
+      selectedTasks: task.selectedTasks,
       host,
       path,
       date: today(),
@@ -1024,7 +1044,8 @@
       status(task.id, value);
       if (task.id === "missions" && value.state === "확인 필요") {
         const items = GM_getValue(key, null)?.items || {};
-        for (const mission of TASKS.filter((t) => t.mission))
+        for (const mission of task.selectedTasks ||
+          TASKS.filter((t) => t.mission))
           if (
             !items[mission.id] ||
             ["스캔 중", "갱신 대기"].includes(items[mission.id].state)
@@ -1214,14 +1235,28 @@
         GM_setValue(LOCK, { id: leaseId, time: Date.now() });
     }, 1000);
     try {
-      for (const task of tasks) {
+      const missionRetries = tasks.filter((task) => task.mission);
+      const plan = tasks.filter((task) => !task.mission);
+      if (missionRetries.length)
+        plan.push({
+          id: "missions",
+          name: "미션 재시도",
+          selectedTasks: missionRetries,
+        });
+      for (const task of plan) {
         check();
-        status(task.id, result("재시도 중", "해당 항목만 다시 확인합니다."));
+        const targets = task.selectedTasks || [task];
+        for (const target of targets)
+          status(
+            target.id,
+            result("재시도 중", "실패한 항목만 묶어서 확인합니다."),
+          );
         try {
           const value = await execute(task, false, modeSelect.value);
-          if (value) status(task.id, value);
+          if (value) for (const target of targets) status(target.id, value);
         } catch (e) {
-          status(task.id, result("확인 필요", e.message));
+          for (const target of targets)
+            status(target.id, result("확인 필요", e.message));
           log(`${task.name} 재시도 실패: ${e.message}`);
         }
       }
@@ -1258,7 +1293,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.8";
+    title.textContent = "Stove Daily Companion · 1.0.9";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
