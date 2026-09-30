@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.9
+// @version      1.0.10
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -26,22 +26,9 @@
   "use strict";
   const PREFIX = "stove_daily_v2:",
     LOCK = PREFIX + "lock";
-  const MISSIONS = [
-    "다양한 게임 보러가기",
-    "MY홈 방문하기",
-    "스토브 메인 방문하기",
-    "스토브 앱 로그인하기",
-    "게임 플레이하기",
-  ];
   const TASKS = [
     { id: "riichi", name: "마작일번가 출석", game: "RIICHICITY_IND" },
     { id: "indie", name: "스토어 출석", game: "STOVEINDIE" },
-    ...MISSIONS.map((name, i) => ({
-      id: "mission" + i,
-      name,
-      mission: true,
-      visit: i < 3,
-    })),
     { id: "draw", name: "캡슐 뽑기", draw: true },
   ];
   const token = new URLSearchParams(location.hash.slice(1)).get("stoveDaily");
@@ -188,9 +175,22 @@
   }
   function syncMissionCatalog(catalog) {
     clickTasks = catalog;
+    for (let i = TASKS.length - 1; i >= 0; i--) {
+      const task = TASKS[i];
+      if (
+        (task.mission && !catalog.some((current) => current.id === task.id)) ||
+        task.id === "missions"
+      ) {
+        rows.get(task.id)?.element.remove();
+        rows.delete(task.id);
+        TASKS.splice(i, 1);
+      }
+    }
     const grid = document.getElementById("stove-daily-status-grid");
     for (const task of catalog) {
-      if (!TASKS.some((t) => t.id === task.id)) TASKS.push(task);
+      const index = TASKS.findIndex((t) => t.id === task.id);
+      if (index < 0) TASKS.push(task);
+      else TASKS[index] = task;
       if (grid && !rows.has(task.id)) addTaskRow(task, grid);
       const row = rows.get(task.id);
       if (row && clickGrid) {
@@ -199,6 +199,14 @@
       }
     }
     updateMissionSummary();
+  }
+  function missionError(value) {
+    if (!rows.has("missions")) {
+      const task = { id: "missions", name: "데일리 미션", dynamic: true };
+      TASKS.push(task);
+      addTaskRow(task, clickGrid);
+    }
+    status("missions", value);
   }
   function discoverClickMissions() {
     const roots = [
@@ -219,18 +227,11 @@
       const label = [...card.querySelectorAll("p")].find(visible);
       const name = label?.textContent.trim();
       if (!name || tasks.some((t) => t.name === name)) continue;
-      const known = TASKS.find((t) => t.mission && t.name === name);
-      const description = [...card.querySelectorAll("p")]
-        .filter(visible)
-        .slice(1)
-        .map((el) => el.textContent)
-        .join(" ");
       tasks.push({
-        id: known?.id || "click:" + encodeURIComponent(name),
+        id: "click:" + encodeURIComponent(name),
         name,
         mission: true,
-        visit: /방문|구경|보러가기|미리보기/.test(name + " " + description),
-        dynamic: !known || !!known.dynamic,
+        dynamic: true,
         clickReward: true,
       });
     }
@@ -425,7 +426,7 @@
       return value;
     };
     if (text(b) === "받기") return await receive();
-    if (task.visit && text(b) === "미션하기" && enabled(b) && !job.visited) {
+    if (text(b) === "미션하기" && enabled(b) && !job.visited) {
       publish(result("방문 중", "방문 후 최신 상태를 다시 읽습니다."));
       await visit(b, read);
       check();
@@ -439,11 +440,14 @@
       location.reload();
       return null;
     }
+    if (text(b) === "미션하기" && job.visited)
+      return result(
+        "조건 미충족",
+        "링크 방문 후 다시 확인했지만 받기로 바뀌지 않았습니다.",
+      );
     return result(
-      task.visit ? "확인 필요" : "조건 미충족",
-      task.visit
-        ? "방문 후 새로고침했지만 받기로 바뀌지 않았습니다."
-        : "사이트에서 미션 조건을 충족한 뒤 다시 확인하세요.",
+      "확인 필요",
+      "미션 버튼을 실행할 수 없습니다. 다시 확인하세요.",
     );
   }
   function milestoneCards(kind) {
@@ -607,19 +611,21 @@
   ) {
     await waitFor(discoverClickMissions, 10000);
     const catalog = discoverClickMissions();
+    if (catalog === null)
+      return result(
+        "확인 필요",
+        "일일 미션 목록을 불러오지 못했습니다. 로그인 상태를 확인하고 재시도하세요.",
+      );
     const missions = job.selectedTasks
-      ? job.selectedTasks.map(
-          (task) => catalog?.find((current) => current.id === task.id) || task,
+      ? catalog.filter((task) =>
+          job.selectedTasks.some((selected) => selected.id === task.id),
         )
-      : [...TASKS.filter((t) => t.mission && !t.dynamic)];
-    for (const task of catalog || []) {
-      const index = missions.findIndex((t) => t.id === task.id);
-      if (index < 0 && !job.selectedTasks) missions.push(task);
-      else if (index >= 0) missions[index] = task;
-    }
-    for (const old of job.selectedTasks ? [] : job.catalog || [])
-      if (!missions.some((t) => t.id === old.id)) missions.push(old);
-    const items = { ...(job.items || {}) };
+      : catalog;
+    const items = Object.fromEntries(
+      Object.entries(job.items || {}).filter(([id]) =>
+        missions.some((task) => task.id === id),
+      ),
+    );
     const visited = { ...(job.visitedItems || {}) };
     const save = () => {
       check();
@@ -627,21 +633,13 @@
         ...jobRead(),
         items,
         visitedItems: visited,
-        catalog: catalog || [],
+        catalog,
       });
     };
     save();
     for (const task of missions) {
       check();
       if (items[task.id] && items[task.id].state !== "갱신 대기") continue;
-      if (catalog === null && task.visit) {
-        items[task.id] = result(
-          "확인 필요",
-          "일일 미션 목록을 불러오지 못했습니다. 로그인 상태를 확인하고 재시도하세요.",
-        );
-        save();
-        continue;
-      }
       items[task.id] = result("스캔 중", "미션 탭에서 순서대로 확인");
       save();
       const value = await perform(task, {
@@ -1023,7 +1021,8 @@
       while (Date.now() < end) {
         check();
         const current = GM_getValue(key, null);
-        if (current?.catalog) syncMissionCatalog(current.catalog);
+        if (Array.isArray(current?.catalog))
+          syncMissionCatalog(current.catalog);
         if (current?.items)
           for (const [id, item] of Object.entries(current.items))
             status(id, item);
@@ -1051,6 +1050,8 @@
             ["스캔 중", "갱신 대기"].includes(items[mission.id].state)
           )
             status(mission.id, value);
+        if (!failedTasks().some((failed) => failed.mission))
+          missionError(value);
       }
       log(`${task.name}: ${value.state} — ${value.detail}`);
     } finally {
@@ -1293,7 +1294,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.9";
+    title.textContent = "Stove Daily Companion · 1.0.10";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
@@ -1368,11 +1369,6 @@
         {
           riichi: "마작 출석",
           indie: "스토어 출석",
-          mission0: "게임 구경",
-          mission1: "MY홈 방문",
-          mission2: "메인 방문",
-          mission3: "앱 로그인",
-          mission4: "게임 플레이",
           draw: "캡슐 뽑기",
         }[task.id] || task.name;
       name.title = task.name;
