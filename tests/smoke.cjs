@@ -11,7 +11,7 @@ const matches = [...code.matchAll(/^\/\/ @match\s+(\S+)/gm)].map((m) => m[1]);
 if (entry < 0) throw new Error("Initialization entry not found");
 code =
   code.slice(0, entry) +
-  "globalThis.h={init,start,stop,today,runPlan,runMissionBatch,month,runDraw,claim,runShop,runMilestones,runMission,shopButton,missionButton,drawCount,closeOfferwall,parseFlakes,totals,history,executeTask,status,retryTask,discoverClickMissions,syncMissionCatalog,failedTasks};})();";
+  "globalThis.h={init,start,stop,today,runPlan,runMissionBatch,month,runDraw,claim,runShop,runMilestones,runMission,trackVisitTabs,shopButton,missionButton,drawCount,closeOfferwall,parseFlakes,totals,history,executeTask,status,retryTask,discoverClickMissions,syncMissionCatalog,failedTasks};})();";
 let passed = 0;
 const missionID = (name) => "click:" + encodeURIComponent(name);
 function missionHTML(names, button = "받기") {
@@ -771,6 +771,175 @@ function drawFixture(
     const grid = f.doc.querySelector("#stove-daily-click-grid");
     assert.equal(grid.children.length, 1);
     assert(grid.textContent.includes("현재 미션"));
+    f.close();
+  });
+  await test("앱 안내 링크를 분리된 a.click으로 열어도 방문 후 탭 닫기", async () => {
+    const f = fixture(missionHTML(["앱 미니게임 플레이하기"], "미션하기"));
+    f.h.init();
+    f.w.unsafeWindow = f.w;
+    const originalOpen = f.w.open;
+    const originalClick = f.w.HTMLAnchorElement.prototype.click;
+    const opened = [];
+    let closed = 0;
+    f.w.GM_openInTab = (url) => {
+      opened.push(url);
+      return {
+        close() {
+          closed++;
+        },
+      };
+    };
+    const b = f.h.missionButton("앱 미니게임 플레이하기");
+    b.onclick = () => {
+      const a = f.doc.createElement("a");
+      a.href = "https://store.onstove.com/ko/stoveApp";
+      a.target = "_blank";
+      a.click();
+    };
+    assert.equal(
+      (
+        await f.h.runMission(
+          { name: "앱 미니게임 플레이하기" },
+          { bundle: true },
+        )
+      ).state,
+      "갱신 대기",
+    );
+    assert.deepEqual(opened, ["https://store.onstove.com/ko/stoveApp"]);
+    assert.equal(closed, 1);
+    assert.equal(f.w.open, originalOpen);
+    assert.equal(f.w.HTMLAnchorElement.prototype.click, originalClick);
+    f.close();
+  });
+  await test("빈 창 생성 후 주소를 바꾸는 미션도 원래 창 핸들을 닫음", async () => {
+    const f = fixture(missionHTML(["앱 미니게임 플레이하기"], "미션하기"));
+    f.h.init();
+    f.w.unsafeWindow = f.w;
+    let closed = 0;
+    const handle = {
+      location: { href: "about:blank" },
+      close() {
+        closed++;
+      },
+    };
+    const original = () => handle;
+    f.w.open = original;
+    f.w.GM_openInTab = () => {
+      throw Error("빈 창은 관리 탭 URL로 변환하면 안 됨");
+    };
+    f.h.missionButton("앱 미니게임 플레이하기").onclick = () => {
+      const opened = f.w.open("", "_blank");
+      opened.location.href = "https://store.onstove.com/ko/stoveApp";
+    };
+    assert.equal(
+      (
+        await f.h.runMission(
+          { name: "앱 미니게임 플레이하기" },
+          { bundle: true },
+        )
+      ).state,
+      "갱신 대기",
+    );
+    assert.equal(handle.location.href, "https://store.onstove.com/ko/stoveApp");
+    assert.equal(closed, 1);
+    assert.equal(f.w.open, original);
+    f.close();
+  });
+  await test("관리 탭 열기 실패 시 원래 새창으로 열고 해당 창도 정리", () => {
+    const f = fixture();
+    f.w.unsafeWindow = f.w;
+    let closed = 0;
+    f.w.open = () => ({
+      close() {
+        closed++;
+      },
+    });
+    f.w.GM_openInTab = () => {
+      throw Error("관리 탭 열기 실패");
+    };
+    const tracker = f.h.trackVisitTabs();
+    f.w.open("https://store.onstove.com/ko/stoveApp", "_blank");
+    tracker.dispose();
+    assert.equal(closed, 1);
+    f.close();
+  });
+  await test("현재·부모 탭은 닫기 대상에서 제외 / 기본 target 새창 링크 추적", () => {
+    const f = fixture(
+      '<base target="_blank"><a href="https://store.onstove.com/ko/stoveApp">앱 안내</a>',
+    );
+    f.w.unsafeWindow = f.w;
+    let protectedClosed = 0,
+      helperClosed = 0;
+    f.w.open = () => ({
+      close() {
+        protectedClosed++;
+      },
+    });
+    f.w.GM_openInTab = () => ({
+      close() {
+        helperClosed++;
+      },
+    });
+    const tracker = f.h.trackVisitTabs();
+    for (const target of ["_self", "_parent", "_top"])
+      f.w.open("https://example.com/", target);
+    const anchor = f.doc.querySelector("a");
+    const event = new f.w.MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+    });
+    anchor.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, true);
+    tracker.dispose();
+    assert.equal(protectedClosed, 0);
+    assert.equal(helperClosed, 1);
+    f.close();
+  });
+  await test("늦게 열린 탭도 미션 묶음이 끝나면 정리 / 처리 오류에도 후킹 복원", async () => {
+    const f = fixture(missionHTML(["첫 미션", "둘째 미션"], "미션하기"), {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
+    const job = { owner: "owner", date: f.h.today(), task: "missions" };
+    f.store.set("stove_daily_v2:batch", job);
+    f.store.set("stove_daily_v2:lock", { id: "owner", time: f.w.Date.now() });
+    f.w.unsafeWindow = f.w;
+    const original = f.w.open;
+    const originalClick = f.w.HTMLAnchorElement.prototype.click;
+    let closed = 0;
+    f.w.GM_openInTab = () => ({
+      close() {
+        closed++;
+      },
+    });
+    f.h.missionButton("첫 미션").onclick = () =>
+      f.w.open("https://store.onstove.com/ko/", "_blank");
+    await assert.rejects(
+      f.h.runMissionBatch(job, async (task, context) => {
+        if (task.name === "첫 미션") return await f.h.runMission(task, context);
+        // 前 방문 처리 이후에도 지연된 이동을 추적한다.
+        f.w.open("https://store.onstove.com/ko/stoveApp", "_blank");
+        throw Error("다음 미션 처리 오류");
+      }),
+      /다음 미션 처리 오류/,
+    );
+    assert.equal(closed, 2);
+    assert.equal(f.w.open, original);
+    assert.equal(f.w.HTMLAnchorElement.prototype.click, originalClick);
+    f.close();
+  });
+  await test("탭 닫기 실패는 완료로 숨기지 않고 오류로 반환", () => {
+    const f = fixture();
+    f.w.unsafeWindow = f.w;
+    const original = f.w.open;
+    f.w.GM_openInTab = () => ({
+      close() {
+        throw Error("닫기 실패");
+      },
+    });
+    const tracker = f.h.trackVisitTabs();
+    f.w.open("https://store.onstove.com/ko/stoveApp", "_blank");
+    assert.throws(() => tracker.dispose(), /미션 방문 탭을 닫지 못했습니다/);
+    assert.equal(f.w.open, original);
     f.close();
   });
   await test("공지사항에서 선택 금액 전달 및 활성 새 탭", async () => {

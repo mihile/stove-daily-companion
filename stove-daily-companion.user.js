@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.10
+// @version      1.0.11
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -347,29 +347,90 @@
       )
     );
   }
-  async function visit(b, read = () => null) {
-    if (!(await closeOfferwall())) throw new Error("게임 목록 팝업 닫기 실패");
+  function trackVisitTabs() {
     const page = unsafeWindow,
       original = page.open,
+      anchorPrototype = page.HTMLAnchorElement.prototype,
+      originalClick = anchorPrototype.click,
       opened = [];
-    // 실제 미션 URL로 관리 가능한 탭을 열어 창 핸들 손실과 팝업 차단을 피함.
-    const hook = function (url, target, features) {
+    const openLink = (url, target) => {
+      if (["_self", "_parent", "_top"].includes(String(target).toLowerCase()))
+        return false;
+      if (!url) return false;
       try {
         const u = new URL(String(url), location.href);
-        if (u.protocol === "https:") {
-          opened.push(
-            GM_openInTab(u.href, {
-              active: false,
-              insert: true,
-              setParent: true,
-            }),
-          );
-          return null;
+        if (!/^https?:$/.test(u.protocol)) return false;
+        opened.push(
+          GM_openInTab(u.href, {
+            active: false,
+            insert: true,
+            setParent: true,
+          }),
+        );
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+    // 링크 클릭과 빈 창 생성도 추적하며, 이 실행에서 연 창만 닫는다.
+    const hook = function (url, target, features) {
+      if (openLink(url, target)) return null;
+      const handle = original.call(page, url, target, features);
+      if (
+        !["_self", "_parent", "_top"].includes(String(target).toLowerCase()) &&
+        handle &&
+        handle !== page &&
+        typeof handle.close === "function"
+      )
+        opened.push(handle);
+      return handle;
+    };
+    const openAnchor = (anchor) => {
+      const target =
+        anchor.target || document.querySelector("base[target]")?.target;
+      return !!target && openLink(anchor.href, target);
+    };
+    const clickHook = function (...args) {
+      if (!openAnchor(this)) return originalClick.apply(this, args);
+    };
+    const linkClick = (event) => {
+      const anchor = event.target?.closest?.("a[href]");
+      if (!event.defaultPrevented && anchor && openAnchor(anchor))
+        event.preventDefault();
+    };
+    const closeOpened = () => {
+      let failures = 0;
+      for (const tab of opened.splice(0)) {
+        try {
+          tab.close();
+        } catch (_) {
+          failures++;
         }
-      } catch (_) {}
-      return original.call(page, url, target, features);
+      }
+      if (failures) throw new Error("미션 방문 탭을 닫지 못했습니다.");
     };
     page.open = hook;
+    anchorPrototype.click = clickHook;
+    document.addEventListener("click", linkClick, true);
+    return {
+      get count() {
+        return opened.length;
+      },
+      closeOpened,
+      dispose() {
+        if (page.open === hook) page.open = original;
+        if (anchorPrototype.click === clickHook)
+          anchorPrototype.click = originalClick;
+        document.removeEventListener("click", linkClick, true);
+        closeOpened();
+      },
+    };
+  }
+  async function visit(b, read = () => null, session) {
+    if (!(await closeOfferwall())) throw new Error("게임 목록 팝업 닫기 실패");
+    const tabs = session
+      ? (session.tabs ||= trackVisitTabs())
+      : trackVisitTabs();
     try {
       check();
       b.click();
@@ -377,7 +438,7 @@
         () =>
           text(read()) === "받기" ||
           done(read()) ||
-          opened.length ||
+          tabs.count ||
           [...document.querySelectorAll(".mission-offerwall-modal")].some(
             visible,
           ),
@@ -388,12 +449,8 @@
       if (!(await closeOfferwall()))
         throw new Error("게임 목록 팝업 닫기 실패");
     } finally {
-      if (page.open === hook) page.open = original;
-      for (const tab of opened) {
-        try {
-          tab.close();
-        } catch (_) {}
-      }
+      if (session) tabs.closeOpened();
+      else tabs.dispose();
     }
   }
   async function runMission(task, job) {
@@ -428,7 +485,7 @@
     if (text(b) === "받기") return await receive();
     if (text(b) === "미션하기" && enabled(b) && !job.visited) {
       publish(result("방문 중", "방문 후 최신 상태를 다시 읽습니다."));
-      await visit(b, read);
+      await visit(b, read, job.visitSession);
       check();
       if (job.bundle) {
         const latest = read();
@@ -637,30 +694,39 @@
       });
     };
     save();
-    for (const task of missions) {
-      check();
-      if (items[task.id] && items[task.id].state !== "갱신 대기") continue;
-      items[task.id] = result("스캔 중", "미션 탭에서 순서대로 확인");
-      save();
-      const value = await perform(task, {
-        ...job,
-        bundle: true,
-        catalogReady: true,
-        visited: !!visited[task.id],
-      });
-      if (value.state === "갱신 대기") visited[task.id] = true;
-      items[task.id] = value;
-      save();
-      if (dialogs().length) {
-        for (const remaining of missions)
-          if (!items[remaining.id] || items[remaining.id].state === "갱신 대기")
-            items[remaining.id] = result(
-              "확인 필요",
-              "안내 팝업을 확인한 뒤 다시 실행하세요.",
-            );
+    const visitSession = {};
+    try {
+      for (const task of missions) {
+        check();
+        if (items[task.id] && items[task.id].state !== "갱신 대기") continue;
+        items[task.id] = result("스캔 중", "미션 탭에서 순서대로 확인");
         save();
-        break;
+        const value = await perform(task, {
+          ...job,
+          bundle: true,
+          catalogReady: true,
+          visited: !!visited[task.id],
+          visitSession,
+        });
+        if (value.state === "갱신 대기") visited[task.id] = true;
+        items[task.id] = value;
+        save();
+        if (dialogs().length) {
+          for (const remaining of missions)
+            if (
+              !items[remaining.id] ||
+              items[remaining.id].state === "갱신 대기"
+            )
+              items[remaining.id] = result(
+                "확인 필요",
+                "안내 팝업을 확인한 뒤 다시 실행하세요.",
+              );
+          save();
+          break;
+        }
       }
+    } finally {
+      visitSession.tabs?.dispose();
     }
     if (
       !job.refreshed &&
@@ -1294,7 +1360,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.10";
+    title.textContent = "Stove Daily Companion · 1.0.11";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
