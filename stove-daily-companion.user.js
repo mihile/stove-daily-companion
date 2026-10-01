@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.11
+// @version      1.0.12
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -31,7 +31,10 @@
     { id: "indie", name: "스토어 출석", game: "STOVEINDIE" },
     { id: "draw", name: "캡슐 뽑기", draw: true },
   ];
-  const token = new URLSearchParams(location.hash.slice(1)).get("stoveDaily");
+  const RESUME = PREFIX + "worker-resume";
+  const token =
+    new URLSearchParams(location.hash.slice(1)).get("stoveDaily") ||
+    restoreWorkerToken();
   const rows = new Map();
   const activeJobs = new Set();
   let running = false,
@@ -85,6 +88,82 @@
   }
   function jobRead() {
     return token ? GM_getValue(PREFIX + token, null) : null;
+  }
+  function restoreWorkerToken() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(RESUME) || "null");
+      if (!saved || window.name !== saved.name) return null;
+      const job = GM_getValue(PREFIX + saved.token, null),
+        lock = GM_getValue(LOCK, null);
+      if (
+        job?.task === "missions" &&
+        job.host === location.hostname &&
+        job.pendingVisit &&
+        !job.cancelled &&
+        !job.result &&
+        job.date === today() &&
+        lock?.id === job.owner &&
+        Date.now() - lock.time < 15000 &&
+        Date.now() - saved.time >= 0 &&
+        Date.now() - saved.time < 120000
+      )
+        return saved.token;
+      clearWorkerResume();
+    } catch (_) {
+      clearWorkerResume();
+    }
+    return null;
+  }
+  function clearWorkerResume() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(RESUME) || "null");
+      if (saved && window.name === saved.name)
+        window.name = saved.previousName || "";
+    } catch (_) {}
+    sessionStorage.removeItem(RESUME);
+  }
+  function checkpointMissionVisit(task) {
+    const job = jobRead();
+    if (job?.task !== "missions" || !job.host || !job.path) return;
+    const old = JSON.parse(sessionStorage.getItem(RESUME) || "null");
+    const saved = {
+      token,
+      name: PREFIX + "worker:" + token,
+      previousName: old?.token === token ? old.previousName : window.name,
+      time: Date.now(),
+    };
+    sessionStorage.setItem(RESUME, JSON.stringify(saved));
+    window.name = saved.name;
+    GM_setValue(PREFIX + token, {
+      ...job,
+      pendingVisit: task.id,
+      items: {
+        ...job.items,
+        [task.id]: result("갱신 대기", "방문 후 미션 페이지에서 다시 확인"),
+      },
+      visitedItems: { ...job.visitedItems, [task.id]: true },
+    });
+  }
+  function returnToMissionPage(job, navigate = (url) => location.replace(url)) {
+    if (job?.task !== "missions" || !job.host || !job.path) return false;
+    if (
+      job.host === location.hostname &&
+      job.path === location.pathname &&
+      new URLSearchParams(location.hash.slice(1)).get("stoveDaily") === token
+    )
+      return false;
+    const count = (job.navigationRestores?.[job.pendingVisit] || 0) + 1;
+    if (count > 2)
+      throw new Error("미션 목록으로 돌아오지 못했습니다. 다시 실행하세요.");
+    GM_setValue(PREFIX + token, {
+      ...jobRead(),
+      navigationRestores: {
+        ...job.navigationRestores,
+        [job.pendingVisit]: count,
+      },
+    });
+    navigate(`https://${job.host}${job.path}#stoveDaily=${token}`);
+    return true;
   }
   function check() {
     if (stopped) throw new Error("중단됨");
@@ -485,8 +564,10 @@
     if (text(b) === "받기") return await receive();
     if (text(b) === "미션하기" && enabled(b) && !job.visited) {
       publish(result("방문 중", "방문 후 최신 상태를 다시 읽습니다."));
+      if (job.bundle) checkpointMissionVisit(task);
       await visit(b, read, job.visitSession);
       check();
+      if (job.bundle && returnToMissionPage(jobRead())) return null;
       if (job.bundle) {
         const latest = read();
         if (done(latest)) return result("완료됨", "방문 후 완료 상태 확인");
@@ -708,6 +789,7 @@
           visited: !!visited[task.id],
           visitSession,
         });
+        if (!value) return null;
         if (value.state === "갱신 대기") visited[task.id] = true;
         items[task.id] = value;
         save();
@@ -1012,14 +1094,15 @@
   }
   async function worker() {
     const job = jobRead();
-    if (
-      !job ||
-      job.path !== location.pathname ||
-      job.host !== location.hostname
-    )
+    if (!job) {
+      clearWorkerResume();
       return;
+    }
     try {
       check();
+      if (job.task === "missions" && returnToMissionPage(job)) return;
+      if (job.path !== location.pathname || job.host !== location.hostname)
+        return;
       publish(result("스캔 중", "사이트 상태 확인 중"));
       const task =
         job.task === "missions"
@@ -1036,8 +1119,10 @@
       if (value) {
         check();
         GM_setValue(PREFIX + token, { ...jobRead(), result: value });
+        clearWorkerResume();
       }
     } catch (e) {
+      clearWorkerResume();
       const latest = jobRead();
       if (latest && !latest.cancelled)
         GM_setValue(PREFIX + token, {
@@ -1360,7 +1445,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.11";
+    title.textContent = "Stove Daily Companion · 1.0.12";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =

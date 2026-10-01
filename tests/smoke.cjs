@@ -11,7 +11,7 @@ const matches = [...code.matchAll(/^\/\/ @match\s+(\S+)/gm)].map((m) => m[1]);
 if (entry < 0) throw new Error("Initialization entry not found");
 code =
   code.slice(0, entry) +
-  "globalThis.h={init,start,stop,today,runPlan,runMissionBatch,month,runDraw,claim,runShop,runMilestones,runMission,trackVisitTabs,shopButton,missionButton,drawCount,closeOfferwall,parseFlakes,totals,history,executeTask,status,retryTask,discoverClickMissions,syncMissionCatalog,failedTasks};})();";
+  "globalThis.h={init,start,stop,today,runPlan,runMissionBatch,month,runDraw,claim,runShop,runMilestones,runMission,trackVisitTabs,checkpointMissionVisit,restoreWorkerToken,clearWorkerResume,returnToMissionPage,shopButton,missionButton,drawCount,closeOfferwall,parseFlakes,totals,history,executeTask,status,retryTask,discoverClickMissions,syncMissionCatalog,failedTasks};})();";
 let passed = 0;
 const missionID = (name) => "click:" + encodeURIComponent(name);
 function missionHTML(names, button = "받기") {
@@ -70,12 +70,22 @@ function fixture(html = "", options = {}) {
   w.GM_getValue = (k, d) => (store.has(k) ? structuredClone(store.get(k)) : d);
   w.GM_setValue = (k, v) => store.set(k, structuredClone(v));
   w.GM_deleteValue = (k) => store.delete(k);
+  if (options.windowName) w.name = options.windowName;
+  for (const [key, value] of Object.entries(options.session || {}))
+    w.sessionStorage.setItem(key, value);
   w.HTMLElement.prototype.getClientRects = function () {
     return !this.isConnected || this.closest("[hidden]") ? [] : [{}];
   };
   w.console.log = () => {};
   w.eval(code);
-  return { w, h: w.h, doc: w.document, store, close: () => w.close() };
+  return {
+    w,
+    h: w.h,
+    doc: w.document,
+    store,
+    navigate: (url) => dom.reconfigure({ url }),
+    close: () => w.close(),
+  };
 }
 async function test(name, fn) {
   await fn();
@@ -916,7 +926,7 @@ function drawFixture(
     await assert.rejects(
       f.h.runMissionBatch(job, async (task, context) => {
         if (task.name === "첫 미션") return await f.h.runMission(task, context);
-        // 前 방문 처리 이후에도 지연된 이동을 추적한다.
+        // 이전 방문 처리 이후에도 지연된 이동을 추적한다.
         f.w.open("https://store.onstove.com/ko/stoveApp", "_blank");
         throw Error("다음 미션 처리 오류");
       }),
@@ -940,6 +950,275 @@ function drawFixture(
     f.w.open("https://store.onstove.com/ko/stoveApp", "_blank");
     assert.throws(() => tracker.dispose(), /미션 방문 탭을 닫지 못했습니다/);
     assert.equal(f.w.open, original);
+    f.close();
+  });
+  await test("경품 페이지 전체 이동 후 작업 복원 / 방문 미션 3개 수령 / 재방문 금지", async () => {
+    const f = fixture(octoberMissions("미션하기"), {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
+    f.w.name = "original-worker-name";
+    const catalog = f.h.discoverClickMissions();
+    const job = {
+      owner: "owner",
+      date: f.h.today(),
+      task: "missions",
+      host: "reward.onstove.com",
+      path: "/ko",
+      catalog,
+      items: Object.fromEntries(
+        catalog.map((t) => [
+          t.id,
+          { state: t.name === "스토브 앱 로그인하기" ? "완료됨" : "갱신 대기" },
+        ]),
+      ),
+      visitedItems: Object.fromEntries(
+        catalog.slice(0, 4).map((t) => [t.id, true]),
+      ),
+    };
+    f.store.set("stove_daily_v2:batch", job);
+    f.store.set("stove_daily_v2:lock", { id: "owner", time: f.w.Date.now() });
+    f.h.checkpointMissionVisit(catalog.at(-1));
+    const checkpoint = f.store.get("stove_daily_v2:batch");
+    assert.equal(checkpoint.pendingVisit, catalog.at(-1).id);
+    assert.equal(checkpoint.visitedItems[catalog.at(-1).id], true);
+    const session = {
+      "stove_daily_v2:worker-resume": f.w.sessionStorage.getItem(
+        "stove_daily_v2:worker-resume",
+      ),
+    };
+    const diverted = fixture(
+      "<h1>행운 득템! 경품 이벤트</h1><button>응모하기</button>",
+      {
+        url: "https://reward.onstove.com/ko/event#apply",
+        store: f.store,
+        session,
+        windowName: f.w.name,
+      },
+    );
+    assert.equal(diverted.h.restoreWorkerToken(), "batch");
+    const routes = [];
+    assert.equal(
+      diverted.h.returnToMissionPage(checkpoint, (url) => routes.push(url)),
+      true,
+    );
+    assert.deepEqual(routes, [
+      "https://reward.onstove.com/ko#stoveDaily=batch",
+    ]);
+    const resumed = fixture(octoberMissions("미션하기"), {
+      url: routes[0],
+      store: f.store,
+      session,
+      windowName: f.w.name,
+    });
+    let received = 0;
+    for (const task of catalog) {
+      const button = resumed.h.missionButton(task.name);
+      if (catalog.slice(0, 3).some((t) => t.id === task.id))
+        button.textContent = "받기";
+      button.onclick = () => {
+        assert.equal(button.textContent, "받기");
+        received++;
+        button.textContent = "받기 완료";
+      };
+    }
+    let reloads = 0;
+    await resumed.h.runMissionBatch(
+      f.store.get("stove_daily_v2:batch"),
+      undefined,
+      () => reloads++,
+    );
+    const finished = f.store.get("stove_daily_v2:batch");
+    assert.equal(received, 3);
+    assert.equal(reloads, 0);
+    assert.equal(
+      Object.values(finished.items).filter((x) => x.state === "완료됨").length,
+      4,
+    );
+    assert.equal(finished.items[catalog[3].id].state, "조건 미충족");
+    assert.equal(finished.items[catalog[5].id].state, "조건 미충족");
+    resumed.h.clearWorkerResume();
+    assert.equal(resumed.w.name, "original-worker-name");
+    assert.equal(
+      resumed.w.sessionStorage.getItem("stove_daily_v2:worker-resume"),
+      null,
+    );
+    resumed.close();
+    diverted.close();
+    f.close();
+  });
+  await test("현재 작업 탭의 주소만 바뀌어도 원래 미션 주소로 복귀 / 원래 주소는 유지", () => {
+    const f = fixture("", {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
+    const job = {
+      owner: "owner",
+      date: f.h.today(),
+      task: "missions",
+      host: "reward.onstove.com",
+      path: "/ko",
+      pendingVisit: "click:prize",
+    };
+    f.store.set("stove_daily_v2:batch", job);
+    const routes = [];
+    assert.equal(
+      f.h.returnToMissionPage(job, (url) => routes.push(url)),
+      false,
+    );
+    f.navigate("https://reward.onstove.com/ko/event#apply");
+    assert.equal(
+      f.h.returnToMissionPage(job, (url) => routes.push(url)),
+      true,
+    );
+    assert.deepEqual(routes, [
+      "https://reward.onstove.com/ko#stoveDaily=batch",
+    ]);
+    f.close();
+  });
+  await test("다른 탭에 복사된 세션은 작업을 복원하지 않음", () => {
+    const time = Date.UTC(2026, 8, 5, 10);
+    const store = new Map([
+      [
+        "stove_daily_v2:batch",
+        {
+          owner: "owner",
+          date: "20260905",
+          task: "missions",
+          host: "reward.onstove.com",
+          path: "/ko",
+          pendingVisit: "click:prize",
+        },
+      ],
+      ["stove_daily_v2:lock", { id: "owner", time }],
+    ]);
+    const session = {
+      "stove_daily_v2:worker-resume": JSON.stringify({
+        token: "batch",
+        name: "stove_daily_v2:worker:batch",
+        previousName: "",
+        time,
+      }),
+    };
+    const f = fixture("", {
+      url: "https://reward.onstove.com/ko/event#apply",
+      store,
+      session,
+      time,
+    });
+    assert.equal(f.h.restoreWorkerToken(), null);
+    f.h.init();
+    assert(f.doc.querySelector("#stove-daily-extension"));
+    assert.equal(
+      store.get("stove_daily_v2:batch").navigationRestores,
+      undefined,
+    );
+    f.close();
+  });
+  await test("중단·만료·완료된 작업은 페이지 이동 후 자동 재개하지 않음", () => {
+    const time = Date.UTC(2026, 8, 5, 10);
+    for (const reason of [
+      "cancelled",
+      "result",
+      "missing",
+      "lock",
+      "age",
+      "date",
+    ]) {
+      const job = {
+        owner: "owner",
+        date: "20260905",
+        task: "missions",
+        host: "reward.onstove.com",
+        path: "/ko",
+        pendingVisit: "click:prize",
+      };
+      if (reason === "cancelled") job.cancelled = true;
+      if (reason === "result") job.result = { state: "처리 종료" };
+      if (reason === "date") job.date = "20260904";
+      const store = new Map([
+        ["stove_daily_v2:batch", job],
+        [
+          "stove_daily_v2:lock",
+          { id: "owner", time: reason === "lock" ? time - 16000 : time },
+        ],
+      ]);
+      if (reason === "missing") store.delete("stove_daily_v2:batch");
+      const name = "stove_daily_v2:worker:batch";
+      const session = {
+        "stove_daily_v2:worker-resume": JSON.stringify({
+          token: "batch",
+          name,
+          previousName: "original",
+          time: reason === "age" ? time - 120001 : time,
+        }),
+      };
+      const f = fixture("", {
+        url: "https://reward.onstove.com/ko/event#apply",
+        store,
+        session,
+        windowName: name,
+        time,
+      });
+      assert.equal(f.h.restoreWorkerToken(), null, reason);
+      assert.equal(f.w.name, "original", reason);
+      assert.equal(
+        f.w.sessionStorage.getItem("stove_daily_v2:worker-resume"),
+        null,
+        reason,
+      );
+      f.close();
+    }
+  });
+  await test("돌아오는 주소가 계속 바뀌면 무한 복귀 대신 오류로 중단", () => {
+    const f = fixture("", {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
+    let job = {
+      task: "missions",
+      host: "reward.onstove.com",
+      path: "/ko",
+      pendingVisit: "prize",
+    };
+    f.store.set("stove_daily_v2:batch", job);
+    f.navigate("https://reward.onstove.com/ko/event#apply");
+    let navigations = 0;
+    for (let i = 0; i < 2; i++) {
+      f.h.returnToMissionPage(job, () => navigations++);
+      job = f.store.get("stove_daily_v2:batch");
+    }
+    assert.throws(
+      () => f.h.returnToMissionPage(job, () => navigations++),
+      /미션 목록으로 돌아오지 못했습니다/,
+    );
+    assert.equal(navigations, 2);
+    f.close();
+  });
+  await test("페이지 복귀가 필요하면 묶음 처리를 멈추고 이동 전 저장한 상태 유지", async () => {
+    const f = fixture(octoberMissions("미션하기"), {
+      url: "https://reward.onstove.com/ko#stoveDaily=batch",
+    });
+    const job = {
+      owner: "owner",
+      date: f.h.today(),
+      task: "missions",
+      host: "reward.onstove.com",
+      path: "/ko",
+    };
+    f.store.set("stove_daily_v2:batch", job);
+    f.store.set("stove_daily_v2:lock", { id: "owner", time: f.w.Date.now() });
+    let calls = 0;
+    assert.equal(
+      await f.h.runMissionBatch(job, async (task) => {
+        calls++;
+        f.h.checkpointMissionVisit(task);
+        return null;
+      }),
+      null,
+    );
+    assert.equal(calls, 1);
+    const saved = f.store.get("stove_daily_v2:batch");
+    assert.equal(saved.items[saved.pendingVisit].state, "갱신 대기");
+    assert.equal(saved.visitedItems[saved.pendingVisit], true);
+    assert.equal(saved.result, undefined);
     f.close();
   });
   await test("공지사항에서 선택 금액 전달 및 활성 새 탭", async () => {
