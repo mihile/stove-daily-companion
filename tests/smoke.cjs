@@ -1221,6 +1221,258 @@ function drawFixture(
     assert.equal(saved.result, undefined);
     f.close();
   });
+  for (const [name, game, delay] of [
+    ["용사단 키우기 방문하기", "105914", 2500],
+    ["수박 만들기 2048 방문하기", "105883", 7000],
+  ])
+    await test(`${name}: 게임 로드 전 닫기 금지 / 받기 전환 후 수령`, async () => {
+      const f = fixture(missionHTML([name], "미션하기"));
+      f.h.init();
+      f.w.unsafeWindow = f.w;
+      f.w.open = () => null;
+      const started = f.w.Date.now();
+      const timer = f.w.setTimeout;
+      const b = f.h.missionButton(name);
+      let opened = false,
+        closed = false,
+        claims = 0;
+      f.w.GM_openInTab = (url, options) => {
+        assert.equal(
+          url,
+          `https://store.onstove.com/ko/taps/${game}?entry=flakeshop_mission`,
+        );
+        assert.equal(options.active, true);
+        opened = true;
+        return {
+          close() {
+            assert.equal(b.textContent, "받기");
+            assert(f.w.Date.now() - started >= delay);
+            closed = true;
+          },
+        };
+      };
+      f.w.setTimeout = (fn, ms) =>
+        timer(() => {
+          if (
+            opened &&
+            !closed &&
+            f.w.Date.now() - started >= delay &&
+            b.textContent === "미션하기"
+          )
+            b.textContent = "받기";
+          fn();
+        }, ms);
+      b.onclick = () => {
+        if (b.textContent === "미션하기")
+          f.w.open(
+            `https://store.onstove.com/ko/taps/${game}?entry=flakeshop_mission`,
+            "_blank",
+          );
+        else {
+          assert(closed);
+          claims++;
+          b.textContent = "받기 완료";
+        }
+      };
+      const value = await f.h.runMission(f.h.discoverClickMissions()[0], {
+        bundle: true,
+      });
+      assert.equal(value.state, "완료됨");
+      assert.equal(claims, 1);
+      assert.equal(closed, true);
+      assert(f.w.Date.now() - started < delay + 500);
+      f.close();
+    });
+  await test("탭스 게임이 즉시 받기로 바뀌면 10초를 채우지 않고 종료", async () => {
+    const name = "새 탭스 게임 방문하기";
+    const f = fixture(missionHTML([name], "미션하기"));
+    f.h.init();
+    f.w.unsafeWindow = f.w;
+    f.w.open = () => null;
+    let closed = 0;
+    f.w.GM_openInTab = () => ({
+      close() {
+        closed++;
+      },
+    });
+    const b = f.h.missionButton(name);
+    b.onclick = () => {
+      if (b.textContent === "미션하기") {
+        f.w.open(
+          "https://store.onstove.com/ko/taps/999999?entry=flakeshop_mission",
+          "_blank",
+        );
+        b.textContent = "받기";
+      } else b.textContent = "받기 완료";
+    };
+    const started = f.w.Date.now();
+    assert.equal(
+      (await f.h.runMission(f.h.discoverClickMissions()[0], { bundle: true }))
+        .state,
+      "완료됨",
+    );
+    assert.equal(closed, 1);
+    assert(f.w.Date.now() - started < 500);
+    f.close();
+  });
+  await test("방문 반영 미확인은 조건 미충족 대신 개별·일괄 재시도 가능", async () => {
+    const name = "용사단 키우기 방문하기";
+    const f = fixture(missionHTML([name], "미션하기"));
+    f.h.init();
+    const task = f.h.discoverClickMissions()[0];
+    f.h.syncMissionCatalog([task]);
+    f.h.missionButton(name).onclick = () => {
+      throw Error("상태 재확인 중 방문 반복 금지");
+    };
+    const value = await f.h.runMission(task, {
+      visited: true,
+      catalogReady: true,
+    });
+    assert.equal(value.state, "확인 필요");
+    f.h.status(task.id, value);
+    assert.equal(f.h.failedTasks()[0].id, task.id);
+    assert.equal(
+      f.doc.querySelector("#stove-daily-click-grid button").textContent,
+      "재시도",
+    );
+    assert(
+      [...f.doc.querySelectorAll("button")].some(
+        (b) => b.textContent === "실패 항목 다시 받기",
+      ),
+    );
+    f.close();
+  });
+  await test("새로고침 후 늦게 반영된 방문 보상도 추가 방문 없이 수령", async () => {
+    const name = "수박 만들기 2048 방문하기";
+    const f = fixture(missionHTML([name], "미션하기"));
+    const task = f.h.discoverClickMissions()[0];
+    const b = f.h.missionButton(name),
+      started = f.w.Date.now(),
+      timer = f.w.setTimeout;
+    f.w.setTimeout = (fn, ms) =>
+      timer(() => {
+        if (f.w.Date.now() - started >= 1500 && b.textContent === "미션하기")
+          b.textContent = "받기";
+        fn();
+      }, ms);
+    let claimed = 0;
+    b.onclick = () => {
+      assert.equal(b.textContent, "받기");
+      claimed++;
+      b.textContent = "받기 완료";
+    };
+    assert.equal(
+      (await f.h.runMission(task, { visited: true, catalogReady: true })).state,
+      "완료됨",
+    );
+    assert.equal(claimed, 1);
+    f.close();
+  });
+  await test("일반 방문 링크는 기존 짧은 대기와 배경 탭 유지", async () => {
+    const name = "스토브 메인 방문하기";
+    const f = fixture(missionHTML([name], "미션하기"));
+    f.h.init();
+    f.w.unsafeWindow = f.w;
+    let closed = 0;
+    f.w.GM_openInTab = (url, options) => {
+      assert.equal(options.active, false);
+      return {
+        close() {
+          closed++;
+        },
+      };
+    };
+    f.h.missionButton(name).onclick = () =>
+      f.w.open("https://store.onstove.com/ko/", "_blank");
+    const started = f.w.Date.now();
+    assert.equal(
+      (await f.h.runMission(f.h.discoverClickMissions()[0], { bundle: true }))
+        .state,
+      "갱신 대기",
+    );
+    assert.equal(closed, 1);
+    assert(f.w.Date.now() - started < 1000);
+    f.close();
+  });
+  await test("탭스 방문 대기는 시간 제한 뒤 닫고 결과를 추측하지 않음", async () => {
+    const name = "새 게임 방문하기";
+    const f = fixture(missionHTML([name], "미션하기"));
+    f.h.init();
+    f.w.unsafeWindow = f.w;
+    f.w.open = () => null;
+    let closed = 0;
+    f.w.GM_openInTab = () => ({
+      close() {
+        closed++;
+      },
+    });
+    f.h.missionButton(name).onclick = () =>
+      f.w.open(
+        "https://store.onstove.com/ko/taps/999999?entry=flakeshop_mission",
+        "_blank",
+      );
+    const started = f.w.Date.now();
+    assert.equal(
+      (await f.h.runMission(f.h.discoverClickMissions()[0], { bundle: true }))
+        .state,
+      "갱신 대기",
+    );
+    assert.equal(closed, 1);
+    assert(f.w.Date.now() - started >= 10000);
+    assert(f.w.Date.now() - started < 10500);
+    f.close();
+  });
+  await test("탭스 방문은 원래 새창과 opener 연결 유지 / 수령 전에 해당 창 정리", async () => {
+    const name = "용사단 키우기 방문하기";
+    const f = fixture(missionHTML([name], "미션하기"));
+    f.h.init();
+    f.w.unsafeWindow = f.w;
+    let closed = 0,
+      opens = 0;
+    const nativeTab = {
+      opener: f.w,
+      close() {
+        closed++;
+      },
+    };
+    const original = (url, target) => {
+      opens++;
+      assert.equal(
+        url,
+        "https://store.onstove.com/ko/taps/105914?entry=flakeshop_mission",
+      );
+      assert.equal(target, "_blank");
+      return nativeTab;
+    };
+    f.w.open = original;
+    f.w.GM_openInTab = () => {
+      throw Error("열린 게임 창을 별도 관리 탭으로 대체 금지");
+    };
+    const b = f.h.missionButton(name);
+    b.onclick = () => {
+      if (b.textContent === "미션하기") {
+        const opened = f.w.open(
+          "https://store.onstove.com/ko/taps/105914?entry=flakeshop_mission",
+          "_blank",
+        );
+        assert.equal(opened, nativeTab);
+        assert.equal(opened.opener, f.w);
+        b.textContent = "받기";
+      } else {
+        assert.equal(closed, 1);
+        b.textContent = "받기 완료";
+      }
+    };
+    assert.equal(
+      (await f.h.runMission(f.h.discoverClickMissions()[0], { bundle: true }))
+        .state,
+      "완료됨",
+    );
+    assert.equal(opens, 1);
+    assert.equal(closed, 1);
+    assert.equal(f.w.open, original);
+    f.close();
+  });
   await test("공지사항에서 선택 금액 전달 및 활성 새 탭", async () => {
     const f = fixture("", {
       url: "https://lostark.game.onstove.com/News/Notice/List",

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.12
+// @version      1.0.13
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -310,6 +310,7 @@
         id: "click:" + encodeURIComponent(name),
         name,
         mission: true,
+        visitOnly: /방문|구경|보러가기|미리보기/.test(name),
         dynamic: true,
         clickReward: true,
       });
@@ -432,28 +433,47 @@
       anchorPrototype = page.HTMLAnchorElement.prototype,
       originalClick = anchorPrototype.click,
       opened = [];
-    const openLink = (url, target) => {
+    const openLink = (url, target, features) => {
       if (["_self", "_parent", "_top"].includes(String(target).toLowerCase()))
         return false;
       if (!url) return false;
       try {
         const u = new URL(String(url), location.href);
         if (!/^https?:$/.test(u.protocol)) return false;
-        opened.push(
-          GM_openInTab(u.href, {
-            active: false,
+        const needsLoad =
+          u.hostname === "store.onstove.com" && /\/taps\//.test(u.pathname);
+        // 게임 페이지와 원래 보상 창 사이의 연결을 유지한다.
+        if (needsLoad) {
+          let nativeTab;
+          try {
+            nativeTab = original.call(page, u.href, target, features);
+          } catch (_) {}
+          if (
+            nativeTab &&
+            nativeTab !== page &&
+            typeof nativeTab.close === "function"
+          ) {
+            opened.push({ tab: nativeTab, needsLoad });
+            return { handle: nativeTab };
+          }
+        }
+        opened.push({
+          tab: GM_openInTab(u.href, {
+            active: needsLoad,
             insert: true,
             setParent: true,
           }),
-        );
-        return true;
+          needsLoad,
+        });
+        return { handle: null };
       } catch (_) {
         return false;
       }
     };
     // 링크 클릭과 빈 창 생성도 추적하며, 이 실행에서 연 창만 닫는다.
     const hook = function (url, target, features) {
-      if (openLink(url, target)) return null;
+      const attempt = openLink(url, target, features);
+      if (attempt) return attempt.handle;
       const handle = original.call(page, url, target, features);
       if (
         !["_self", "_parent", "_top"].includes(String(target).toLowerCase()) &&
@@ -461,7 +481,7 @@
         handle !== page &&
         typeof handle.close === "function"
       )
-        opened.push(handle);
+        opened.push({ tab: handle, needsLoad: true });
       return handle;
     };
     const openAnchor = (anchor) => {
@@ -479,7 +499,7 @@
     };
     const closeOpened = () => {
       let failures = 0;
-      for (const tab of opened.splice(0)) {
+      for (const { tab } of opened.splice(0)) {
         try {
           tab.close();
         } catch (_) {
@@ -494,6 +514,9 @@
     return {
       get count() {
         return opened.length;
+      },
+      get waitMs() {
+        return opened.some((entry) => entry.needsLoad) ? 10000 : 750;
       },
       closeOpened,
       dispose() {
@@ -523,8 +546,9 @@
           ),
         8000,
       );
-      // 전환이 보이면 즉시 진행. 화면이 갱신되지 않는 사이트 경로만 짧게 기다림.
-      await waitFor(() => text(read()) === "받기" || done(read()), 750);
+      // 탭스 게임은 페이지가 로드되어 방문이 반영될 시간을 준다.
+      // 받기 전환이 확인되면 바로 닫아 추가 대기를 줄인다.
+      await waitFor(() => text(read()) === "받기" || done(read()), tabs.waitMs);
       if (!(await closeOfferwall()))
         throw new Error("게임 목록 팝업 닫기 실패");
     } finally {
@@ -578,11 +602,21 @@
       location.reload();
       return null;
     }
-    if (text(b) === "미션하기" && job.visited)
+    if (text(b) === "미션하기" && job.visited) {
+      if (task.visitOnly ?? /방문|구경|보러가기|미리보기/.test(task.name)) {
+        await waitFor(() => text(read()) === "받기" || done(read()), 3000);
+        if (done(read())) return result("완료됨", "방문 후 완료 상태 확인");
+        if (text(read()) === "받기") return await receive();
+        return result(
+          "확인 필요",
+          "방문 반영을 확인하지 못했습니다. 다시 시도하세요.",
+        );
+      }
       return result(
         "조건 미충족",
         "링크 방문 후 다시 확인했지만 받기로 바뀌지 않았습니다.",
       );
+    }
     return result(
       "확인 필요",
       "미션 버튼을 실행할 수 없습니다. 다시 확인하세요.",
@@ -1445,7 +1479,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.12";
+    title.textContent = "Stove Daily Companion · 1.0.13";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
