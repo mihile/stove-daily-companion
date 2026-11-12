@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.13
+// @version      1.0.14
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -11,6 +11,7 @@
 // @match        https://lostark.game.onstove.com/Inspection/*
 // @match        https://event.onstove.com/ko/dailyshop/RIICHICITY_IND/*
 // @match        https://event.onstove.com/ko/dailyshop/STOVEINDIE/*
+// @match        https://store.onstove.com/ko/taps/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -442,6 +443,7 @@
         if (!/^https?:$/.test(u.protocol)) return false;
         const needsLoad =
           u.hostname === "store.onstove.com" && /\/taps\//.test(u.pathname);
+        const helperKey = needsLoad ? prepareGameVisit(u) : null;
         // 게임 페이지와 원래 보상 창 사이의 연결을 유지한다.
         if (needsLoad) {
           let nativeTab;
@@ -453,7 +455,7 @@
             nativeTab !== page &&
             typeof nativeTab.close === "function"
           ) {
-            opened.push({ tab: nativeTab, needsLoad });
+            opened.push({ tab: nativeTab, needsLoad, helperKey });
             return { handle: nativeTab };
           }
         }
@@ -464,6 +466,7 @@
             setParent: true,
           }),
           needsLoad,
+          helperKey,
         });
         return { handle: null };
       } catch (_) {
@@ -499,7 +502,8 @@
     };
     const closeOpened = () => {
       let failures = 0;
-      for (const { tab } of opened.splice(0)) {
+      for (const { tab, helperKey } of opened.splice(0)) {
+        if (helperKey) GM_deleteValue(helperKey);
         try {
           tab.close();
         } catch (_) {
@@ -518,6 +522,13 @@
       get waitMs() {
         return opened.some((entry) => entry.needsLoad) ? 10000 : 750;
       },
+      get dismissed() {
+        return opened.some(
+          (entry) =>
+            entry.helperKey &&
+            GM_getValue(entry.helperKey, null)?.phase === "dismissed",
+        );
+      },
       closeOpened,
       dispose() {
         if (page.open === hook) page.open = original;
@@ -527,6 +538,82 @@
         closeOpened();
       },
     };
+  }
+  function prepareGameVisit(url) {
+    const parent = jobRead();
+    if (!parent?.owner || parent.task !== "missions") return null;
+    const id = crypto.randomUUID(),
+      key = PREFIX + "visit:" + id;
+    GM_setValue(key, {
+      parent: token,
+      owner: parent.owner,
+      url: url.origin + url.pathname,
+      expires: Date.now() + 20000,
+      phase: "opening",
+    });
+    GM_setValue(PREFIX + token, {
+      ...parent,
+      visitKeys: [...(parent.visitKeys || []), key],
+    });
+    const hash = new URLSearchParams(url.hash.slice(1));
+    hash.set("stoveVisit", id);
+    url.hash = hash.toString();
+    return key;
+  }
+  function gameVisitRequest() {
+    const id = new URLSearchParams(location.hash.slice(1)).get("stoveVisit");
+    if (!id) return null;
+    const key = PREFIX + "visit:" + id,
+      request = GM_getValue(key, null);
+    if (!request || request.url !== location.origin + location.pathname)
+      return null;
+    return { key, request };
+  }
+  function gameVisitActive(request) {
+    const parent = GM_getValue(PREFIX + request.parent, null),
+      lock = GM_getValue(LOCK, null);
+    return (
+      Date.now() < request.expires &&
+      parent?.owner === request.owner &&
+      !parent.cancelled &&
+      !parent.result &&
+      parent.date === today() &&
+      lock?.id === request.owner &&
+      Date.now() - lock.time < 15000
+    );
+  }
+  function gameConsentClose() {
+    const panels = [
+      ...document.querySelectorAll('.stds-dialog-panel,[role="dialog"]'),
+    ].filter(
+      (panel) => visible(panel) && text(panel).includes("약관동의가필요해요."),
+    );
+    return panels
+      .flatMap((panel) => buttons(panel))
+      .find((button) => enabled(button) && text(button) === "닫기");
+  }
+  async function runGameVisit(close = () => window.close()) {
+    const visit = gameVisitRequest();
+    if (!visit) return;
+    let dismissed = false;
+    try {
+      // 이 실행에서 연 방문 창만 처리한다. 동의·계속하기 버튼은 누르지 않는다.
+      while (GM_getValue(visit.key, null) && gameVisitActive(visit.request)) {
+        if (!dismissed) {
+          const button = gameConsentClose();
+          if (button) {
+            button.click();
+            dismissed = true;
+            if (GM_getValue(visit.key, null))
+              GM_setValue(visit.key, { ...visit.request, phase: "dismissed" });
+          }
+        }
+        await sleep(150);
+      }
+    } finally {
+      GM_deleteValue(visit.key);
+      close();
+    }
   }
   async function visit(b, read = () => null, session) {
     if (!(await closeOfferwall())) throw new Error("게임 목록 팝업 닫기 실패");
@@ -548,7 +635,12 @@
       );
       // 탭스 게임은 페이지가 로드되어 방문이 반영될 시간을 준다.
       // 받기 전환이 확인되면 바로 닫아 추가 대기를 줄인다.
-      await waitFor(() => text(read()) === "받기" || done(read()), tabs.waitMs);
+      await waitFor(
+        () => text(read()) === "받기" || done(read()) || tabs.dismissed,
+        tabs.waitMs,
+      );
+      if (tabs.dismissed && text(read()) !== "받기" && !done(read()))
+        await waitFor(() => text(read()) === "받기" || done(read()), 1200);
       if (!(await closeOfferwall()))
         throw new Error("게임 목록 팝업 닫기 실패");
     } finally {
@@ -1242,11 +1334,10 @@
     } finally {
       const current = GM_getValue(key, null);
       if (current) GM_setValue(key, { ...current, cancelled: true });
-      if (value && value.state !== "확인 필요") {
-        try {
-          tab?.close();
-        } catch (_) {}
-      }
+      for (const visitKey of current?.visitKeys || []) GM_deleteValue(visitKey);
+      try {
+        tab?.close();
+      } catch (_) {}
       GM_deleteValue(key);
       activeJobs.delete(key);
     }
@@ -1469,6 +1560,10 @@
     log("중단 요청됨 · 이미 전송된 수령/뽑기 1회는 취소되지 않습니다.");
   }
   function init() {
+    if (location.hostname === "store.onstove.com") {
+      runGameVisit().catch((e) => console.warn("[일일 보상] 방문 창 정리:", e));
+      return;
+    }
     if (token) {
       worker();
       return;
@@ -1479,7 +1574,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.13";
+    title.textContent = "Stove Daily Companion · 1.0.14";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
