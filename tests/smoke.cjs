@@ -1943,6 +1943,79 @@ function drawFixture(
       assert(!f.store.has(key));
       f.close();
     });
+  for (const game of ["105914", "105883"])
+    await test(`실제 미션 주소 /taps/${game}에서 /ko/taps/${game}로 이동해도 요청 인식`, async () => {
+      const f = gameVisitFixture();
+      f.navigate(
+        `https://store.onstove.com/ko/taps/${game}?entry=flakeshop_mission#stoveVisit=helper`,
+      );
+      f.store.set(f.key, {
+        ...f.request,
+        url: `https://store.onstove.com/taps/${game}`,
+      });
+      let clicked = 0,
+        closed = 0;
+      const timer = f.w.setTimeout;
+      f.doc.querySelector("#cancel").onclick = () => clicked++;
+      f.w.setTimeout = (fn, ms) =>
+        timer(() => {
+          if (clicked) f.store.delete(f.key);
+          fn();
+        }, ms);
+      await f.h.runGameVisit(() => closed++);
+      assert.equal(clicked, 1);
+      assert.equal(closed, 1);
+      f.close();
+    });
+  await test("로케일 없는 게임 주소는 한국어 주소로 열고 같은 주소로 요청 저장", () => {
+    const f = fixture("", {
+      url: "https://reward.onstove.com/ko#stoveDaily=parent",
+    });
+    f.store.set("stove_daily_v2:parent", {
+      task: "missions",
+      owner: "owner",
+      date: f.h.today(),
+    });
+    f.w.unsafeWindow = f.w;
+    f.w.open = () => null;
+    let opened;
+    f.w.GM_openInTab = (url) => {
+      opened = new URL(url);
+      return { close() {} };
+    };
+    const tracker = f.h.trackVisitTabs();
+    f.w.open(
+      "https://store.onstove.com/taps/105883?entry=flakeshop_mission",
+      "_blank",
+    );
+    assert.equal(opened.pathname, "/ko/taps/105883");
+    assert.equal(opened.searchParams.get("entry"), "flakeshop_mission");
+    const key =
+      "stove_daily_v2:visit:" +
+      new URLSearchParams(opened.hash.slice(1)).get("stoveVisit");
+    assert.equal(
+      f.store.get(key).url,
+      "https://store.onstove.com/ko/taps/105883",
+    );
+    tracker.dispose();
+    f.close();
+  });
+  await test("주소가 비슷해도 다른 게임·다른 호스트는 자동 닫기 금지", async () => {
+    for (const url of [
+      "https://store.onstove.com/taps/105914",
+      "https://example.com/taps/105883",
+    ]) {
+      const f = gameVisitFixture();
+      f.store.set(f.key, { ...f.request, url });
+      let closed = 0;
+      f.doc.querySelector("#cancel").onclick = () => {
+        throw Error("잘못된 창 클릭 금지");
+      };
+      await f.h.runGameVisit(() => closed++);
+      assert.equal(closed, 0);
+      f.close();
+    }
+  });
   await test("공지사항에서 선택 금액 전달 및 활성 새 탭", async () => {
     const f = fixture("", {
       url: "https://lostark.game.onstove.com/News/Notice/List",

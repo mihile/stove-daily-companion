@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.15
+// @version      1.0.16
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -582,6 +582,9 @@
   function prepareGameVisit(url) {
     const parent = jobRead();
     if (!parent?.owner || parent.task !== "missions") return null;
+    // 미션 링크의 /taps/가 /ko/taps/로 이동해도 같은 게임이다.
+    if (/^\/taps\/\d+\/?$/.test(url.pathname))
+      url.pathname = "/ko" + url.pathname;
     const id = crypto.randomUUID(),
       key = PREFIX + "visit:" + id;
     GM_setValue(key, {
@@ -605,7 +608,15 @@
     if (!id) return null;
     const key = PREFIX + "visit:" + id,
       request = GM_getValue(key, null);
-    if (!request || request.url !== location.origin + location.pathname)
+    const gamePath = (value) =>
+      new URL(value).pathname
+        .replace(/^\/ko\/taps\//, "/taps/")
+        .replace(/\/$/, "");
+    if (
+      !request ||
+      new URL(request.url).origin !== location.origin ||
+      gamePath(request.url) !== gamePath(location.href)
+    )
       return null;
     return { key, request };
   }
@@ -1647,7 +1658,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.15";
+    title.textContent = "Stove Daily Companion · 1.0.16";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =
