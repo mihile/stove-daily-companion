@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.16
+// @version      1.0.17
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -465,18 +465,21 @@
             return { handle: nativeTab };
           }
         }
+        const managedTab = GM_openInTab(u.href, {
+          active: needsLoad,
+          insert: true,
+          setParent: true,
+        });
         opened.push({
-          tab: GM_openInTab(u.href, {
-            active: needsLoad,
-            insert: true,
-            setParent: true,
-          }),
+          tab: managedTab,
           needsLoad,
           helperKey,
           url: u.href,
           openedAt: Date.now(),
         });
-        return { handle: null };
+        // 사이트는 반환된 창의 closed 상태로 팝업 열기 성공 여부를 판정한다.
+        // 대체 탭을 열고 null을 돌려주면 방문 보상 처리를 건너뛴다.
+        return { handle: needsLoad ? managedTab : null };
       } catch (_) {
         return false;
       }
@@ -1658,7 +1661,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.16";
+    title.textContent = "Stove Daily Companion · 1.0.17";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =

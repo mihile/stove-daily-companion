@@ -2016,6 +2016,82 @@ function drawFixture(
       f.close();
     }
   });
+  for (const game of ["105914", "105883"])
+    await test(`팝업 차단 시 /taps/${game} 대체 탭의 실제 상태 반환 / 사이트 보상 처리 지속`, async () => {
+      const name =
+        game === "105914"
+          ? "용사단 키우기 방문하기"
+          : "수박 만들기 2048 방문하기";
+      const f = fixture(missionHTML([name], "미션하기"), {
+        url: "https://reward.onstove.com/ko#stoveDaily=parent",
+      });
+      f.store.set("stove_daily_v2:parent", {
+        task: "missions",
+        owner: "owner",
+        date: f.h.today(),
+      });
+      f.store.set("stove_daily_v2:lock", { id: "owner", time: f.w.Date.now() });
+      f.w.unsafeWindow = f.w;
+      f.w.open = () => null;
+      const handle = {
+        closed: false,
+        close() {
+          this.closed = true;
+        },
+      };
+      let opened = 0,
+        processed = 0;
+      f.w.GM_openInTab = (url) => {
+        opened++;
+        assert.equal(new URL(url).pathname, `/ko/taps/${game}`);
+        return handle;
+      };
+      const button = f.h.missionButton(name);
+      button.onclick = () => {
+        if (button.textContent === "미션하기") {
+          // 실제 사이트의 팝업 헬퍼는 !popup || popup.closed 일 때 보상 처리를 중단한다.
+          const popup = f.w.open(
+            `https://store.onstove.com/taps/${game}?entry=flakeshop_mission`,
+            `stove-h5-${game}`,
+            "width=540,height=960",
+          );
+          if (!popup || popup.closed) return;
+          processed++;
+          button.textContent = "받기";
+        } else button.textContent = "받기 완료";
+      };
+      assert.equal(
+        (await f.h.runMission(f.h.discoverClickMissions()[0], { bundle: true }))
+          .state,
+        "완료됨",
+      );
+      assert.equal(opened, 1);
+      assert.equal(processed, 1);
+      assert.equal(handle.closed, true);
+      f.close();
+    });
+  await test("대체 방문 창의 닫힘 상태는 실제 탭 상태를 그대로 따른다", () => {
+    const f = fixture();
+    f.w.unsafeWindow = f.w;
+    f.w.open = () => null;
+    const handle = {
+      closed: false,
+      close() {
+        this.closed = true;
+      },
+    };
+    f.w.GM_openInTab = () => handle;
+    const tracker = f.h.trackVisitTabs();
+    const popup = f.w.open(
+      "https://store.onstove.com/taps/105883",
+      "stove-h5-105883",
+    );
+    assert.equal(popup, handle);
+    assert.equal(popup.closed, false);
+    tracker.dispose();
+    assert.equal(popup.closed, true);
+    f.close();
+  });
   await test("공지사항에서 선택 금액 전달 및 활성 새 탭", async () => {
     const f = fixture("", {
       url: "https://lostark.game.onstove.com/News/Notice/List",
