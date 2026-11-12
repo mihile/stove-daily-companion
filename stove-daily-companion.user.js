@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stove Daily Companion
 // @namespace    stove-daily-companion
-// @version      1.0.14
+// @version      1.0.15
 // @updateURL    https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @downloadURL  https://raw.githubusercontent.com/mihile/stove-daily-companion/main/stove-daily-companion.user.js
 // @supportURL   https://github.com/mihile/stove-daily-companion/issues
@@ -455,7 +455,13 @@
             nativeTab !== page &&
             typeof nativeTab.close === "function"
           ) {
-            opened.push({ tab: nativeTab, needsLoad, helperKey });
+            opened.push({
+              tab: nativeTab,
+              needsLoad,
+              helperKey,
+              url: u.href,
+              openedAt: Date.now(),
+            });
             return { handle: nativeTab };
           }
         }
@@ -467,6 +473,8 @@
           }),
           needsLoad,
           helperKey,
+          url: u.href,
+          openedAt: Date.now(),
         });
         return { handle: null };
       } catch (_) {
@@ -520,7 +528,39 @@
         return opened.length;
       },
       get waitMs() {
-        return opened.some((entry) => entry.needsLoad) ? 10000 : 750;
+        return opened.some((entry) => entry.helperKey)
+          ? 22000
+          : opened.some((entry) => entry.needsLoad)
+            ? 10000
+            : 750;
+      },
+      refreshUnstarted() {
+        for (const entry of opened) {
+          if (!entry.helperKey || Date.now() - entry.openedAt < 8000) continue;
+          const request = GM_getValue(entry.helperKey, null);
+          if (!request || request.phase !== "opening" || request.reloaded)
+            continue;
+          GM_setValue(entry.helperKey, { ...request, reloaded: true });
+          try {
+            entry.tab?.close();
+          } catch (_) {}
+          entry.tab = GM_openInTab(entry.url, {
+            active: true,
+            insert: true,
+            setParent: true,
+          });
+        }
+      },
+      get problem() {
+        for (const entry of opened) {
+          if (!entry.helperKey) continue;
+          const request = GM_getValue(entry.helperKey, null);
+          if (request?.phase === "dismissed") continue;
+          return request?.phase === "ready"
+            ? "게임 창은 열렸지만 약관 안내의 닫기를 확인하지 못했습니다. 다시 시도하세요."
+            : "게임 창 자동 처리가 시작되지 않았습니다. 탭스 페이지의 스크립트 실행 허용 상태를 확인하세요.";
+        }
+        return null;
       },
       get dismissed() {
         return opened.some(
@@ -548,7 +588,7 @@
       parent: token,
       owner: parent.owner,
       url: url.origin + url.pathname,
-      expires: Date.now() + 20000,
+      expires: Date.now() + 30000,
       phase: "opening",
     });
     GM_setValue(PREFIX + token, {
@@ -592,11 +632,20 @@
       .flatMap((panel) => buttons(panel))
       .find((button) => enabled(button) && text(button) === "닫기");
   }
-  async function runGameVisit(close = () => window.close()) {
-    const visit = gameVisitRequest();
+  async function runGameVisit(
+    close = () => window.close(),
+    reload = () => location.reload(),
+  ) {
+    if (!new URLSearchParams(location.hash.slice(1)).get("stoveVisit")) return;
+    // 새 탭 초기 저장소 동기화가 끝나기 전에 요청이 없다고 종료하지 않는다.
+    const visit = await waitFor(gameVisitRequest, 3000);
     if (!visit) return;
-    let dismissed = false;
+    let dismissed = false,
+      navigating = false;
+    const started = Date.now();
     try {
+      if (gameVisitActive(visit.request))
+        GM_setValue(visit.key, { ...visit.request, phase: "ready" });
       // 이 실행에서 연 방문 창만 처리한다. 동의·계속하기 버튼은 누르지 않는다.
       while (GM_getValue(visit.key, null) && gameVisitActive(visit.request)) {
         if (!dismissed) {
@@ -605,14 +654,35 @@
             button.click();
             dismissed = true;
             if (GM_getValue(visit.key, null))
-              GM_setValue(visit.key, { ...visit.request, phase: "dismissed" });
+              GM_setValue(visit.key, {
+                ...GM_getValue(visit.key),
+                phase: "dismissed",
+              });
           }
+        }
+        const current = GM_getValue(visit.key, null);
+        if (
+          !dismissed &&
+          Date.now() - started >= 6000 &&
+          current &&
+          !current.reloaded
+        ) {
+          GM_setValue(visit.key, {
+            ...current,
+            phase: "opening",
+            reloaded: true,
+          });
+          reload();
+          navigating = true;
+          return;
         }
         await sleep(150);
       }
     } finally {
-      GM_deleteValue(visit.key);
-      close();
+      if (!navigating) {
+        GM_deleteValue(visit.key);
+        close();
+      }
     }
   }
   async function visit(b, read = () => null, session) {
@@ -635,14 +705,16 @@
       );
       // 탭스 게임은 페이지가 로드되어 방문이 반영될 시간을 준다.
       // 받기 전환이 확인되면 바로 닫아 추가 대기를 줄인다.
-      await waitFor(
-        () => text(read()) === "받기" || done(read()) || tabs.dismissed,
-        tabs.waitMs,
-      );
+      await waitFor(() => {
+        tabs.refreshUnstarted();
+        return text(read()) === "받기" || done(read()) || tabs.dismissed;
+      }, tabs.waitMs);
       if (tabs.dismissed && text(read()) !== "받기" && !done(read()))
         await waitFor(() => text(read()) === "받기" || done(read()), 1200);
       if (!(await closeOfferwall()))
         throw new Error("게임 목록 팝업 닫기 실패");
+      if (text(read()) !== "받기" && !done(read()) && tabs.problem)
+        return result("확인 필요", tabs.problem);
     } finally {
       if (session) tabs.closeOpened();
       else tabs.dispose();
@@ -681,7 +753,8 @@
     if (text(b) === "미션하기" && enabled(b) && !job.visited) {
       publish(result("방문 중", "방문 후 최신 상태를 다시 읽습니다."));
       if (job.bundle) checkpointMissionVisit(task);
-      await visit(b, read, job.visitSession);
+      const visitIssue = await visit(b, read, job.visitSession);
+      if (visitIssue) return visitIssue;
       check();
       if (job.bundle && returnToMissionPage(jobRead())) return null;
       if (job.bundle) {
@@ -1574,7 +1647,7 @@
     panel.style.cssText =
       "position:fixed;left:16px;bottom:16px;box-sizing:border-box;width:350px;max-width:calc(100vw - 32px);max-height:85vh;overflow:auto;padding:12px;background:#20242c;color:white;z-index:999998;border-radius:10px;font:13px/1.5 sans-serif;box-shadow:0 2px 12px #0006";
     const title = document.createElement("strong");
-    title.textContent = "Stove Daily Companion · 1.0.14";
+    title.textContent = "Stove Daily Companion · 1.0.15";
     panel.append(title);
     summary = document.createElement("div");
     summary.textContent =

@@ -1607,6 +1607,7 @@ function drawFixture(
     });
   await test("방문 안내가 없거나 닫기 실행 오류가 나도 시간 제한과 창 정리 보장", async () => {
     const f = gameVisitFixture("<button>계속하기</button>");
+    f.store.set(f.key, { ...f.request, reloaded: true });
     let closed = 0;
     const started = f.w.Date.now();
     await f.h.runGameVisit(() => closed++);
@@ -1662,7 +1663,7 @@ function drawFixture(
       timer(() => {
         if (helper && f.store.has(helper))
           f.store.set(helper, { ...f.store.get(helper), phase: "dismissed" });
-          if (f.w.Date.now() - started >= 700 && b.textContent === "미션하기")
+        if (f.w.Date.now() - started >= 700 && b.textContent === "미션하기")
           b.textContent = "받기";
         fn();
       }, ms);
@@ -1726,6 +1727,220 @@ function drawFixture(
         );
       assert.equal(closed, 1);
       assert(!f.store.has(helper));
+      f.close();
+    });
+  await test("게임 탭의 초기 저장소 전달이 늦어도 요청을 기다려 안내 닫기", async () => {
+    const f = gameVisitFixture();
+    f.store.delete(f.key);
+    let clicked = 0,
+      closed = 0;
+    const timer = f.w.setTimeout,
+      started = f.w.Date.now();
+    f.doc.querySelector("#cancel").onclick = () => clicked++;
+    f.w.setTimeout = (fn, ms) =>
+      timer(() => {
+        if (!clicked && f.w.Date.now() - started >= 500 && !f.store.has(f.key))
+          f.store.set(f.key, f.request);
+        if (clicked) f.store.delete(f.key);
+        fn();
+      }, ms);
+    await f.h.runGameVisit(() => closed++);
+    assert.equal(clicked, 1);
+    assert.equal(closed, 1);
+    assert(f.w.Date.now() - started >= 500);
+    f.close();
+  });
+  await test("새 게임 창이 보조 코드를 시작했음을 부모에 먼저 알림", async () => {
+    const f = gameVisitFixture("<button>계속하기</button>");
+    let closed = 0;
+    const timer = f.w.setTimeout;
+    f.w.setTimeout = (fn, ms) =>
+      timer(() => {
+        assert.equal(f.store.get(f.key).phase, "ready");
+        f.store.delete(f.key);
+        fn();
+      }, ms);
+    await f.h.runGameVisit(() => closed++);
+    assert.equal(closed, 1);
+    f.close();
+  });
+  await test("첫 게임 로딩에서 안내를 놓치면 한 번 갱신 / 갱신 중 요청·창 유지", async () => {
+    const f = gameVisitFixture("<button>계속하기</button>");
+    let closed = 0,
+      reloaded = 0;
+    await f.h.runGameVisit(
+      () => closed++,
+      () => reloaded++,
+    );
+    assert.equal(reloaded, 1);
+    assert.equal(closed, 0);
+    assert.equal(f.store.get(f.key).reloaded, true);
+    const refreshed = fixture(
+      '<div role="dialog"><p>약관 동의가 필요해요.</p><button>닫기</button></div>',
+      { url: f.w.location.href, store: f.store, time: f.w.Date.now() },
+    );
+    let clicked = 0;
+    const timer = refreshed.w.setTimeout;
+    refreshed.doc.querySelector("button").onclick = () => clicked++;
+    refreshed.w.setTimeout = (fn, ms) =>
+      timer(() => {
+        if (clicked) refreshed.store.delete(f.key);
+        fn();
+      }, ms);
+    await refreshed.h.runGameVisit(
+      () => closed++,
+      () => reloaded++,
+    );
+    assert.equal(clicked, 1);
+    assert.equal(closed, 1);
+    assert.equal(reloaded, 1);
+    refreshed.close();
+    f.close();
+  });
+  await test("게임 안내가 계속 없어도 갱신은 한 번만 / 무한 새창 방지", async () => {
+    const f = gameVisitFixture("<button>계속하기</button>");
+    f.store.set(f.key, { ...f.request, reloaded: true });
+    let closed = 0,
+      reloaded = 0;
+    await f.h.runGameVisit(
+      () => closed++,
+      () => reloaded++,
+    );
+    assert.equal(reloaded, 0);
+    assert.equal(closed, 1);
+    f.close();
+  });
+  await test("게임 탭 보조 실행이 누락되면 8초 후 창을 정리하고 한 번 다시 열기", () => {
+    const f = fixture("", {
+      url: "https://reward.onstove.com/ko#stoveDaily=parent",
+    });
+    f.store.set("stove_daily_v2:parent", {
+      task: "missions",
+      owner: "owner",
+      date: f.h.today(),
+    });
+    f.w.unsafeWindow = f.w;
+    f.w.open = () => null;
+    const opened = [];
+    let closed = 0;
+    f.w.GM_openInTab = (url) => {
+      opened.push(url);
+      return {
+        close() {
+          closed++;
+        },
+      };
+    };
+    const tracker = f.h.trackVisitTabs();
+    f.w.open(
+      "https://store.onstove.com/ko/taps/105883?entry=flakeshop_mission",
+      "_blank",
+    );
+    const key = f.store.get("stove_daily_v2:parent").visitKeys[0];
+    const ActualDate = f.w.Date;
+    f.w.Date = class extends ActualDate {
+      static now() {
+        return ActualDate.now() + 8100;
+      }
+    };
+    tracker.refreshUnstarted();
+    tracker.refreshUnstarted();
+    assert.equal(opened.length, 2);
+    assert.equal(opened[0], opened[1]);
+    assert.equal(closed, 1);
+    assert.equal(f.store.get(key).reloaded, true);
+    tracker.dispose();
+    assert.equal(closed, 2);
+    assert(!f.store.has(key));
+    f.close();
+  });
+  await test("게임 보조 실행이 준비되면 부모에서 다시 열지 않음", () => {
+    const f = fixture("", {
+      url: "https://reward.onstove.com/ko#stoveDaily=parent",
+    });
+    f.store.set("stove_daily_v2:parent", {
+      task: "missions",
+      owner: "owner",
+      date: f.h.today(),
+    });
+    f.w.unsafeWindow = f.w;
+    f.w.open = () => null;
+    let opened = 0;
+    f.w.GM_openInTab = () => {
+      opened++;
+      return { close() {} };
+    };
+    const tracker = f.h.trackVisitTabs();
+    f.w.open(
+      "https://store.onstove.com/ko/taps/105883?entry=flakeshop_mission",
+      "_blank",
+    );
+    const key = f.store.get("stove_daily_v2:parent").visitKeys[0];
+    f.store.set(key, { ...f.store.get(key), phase: "ready" });
+    const ActualDate = f.w.Date;
+    f.w.Date = class extends ActualDate {
+      static now() {
+        return ActualDate.now() + 8100;
+      }
+    };
+    tracker.refreshUnstarted();
+    assert.equal(opened, 1);
+    tracker.dispose();
+    f.close();
+  });
+  for (const phase of ["opening", "ready"])
+    await test(`보조 코드 ${phase} 상태 미진행은 구체적인 재시도 사유 표시`, async () => {
+      const name = "수박 만들기 2048 방문하기";
+      const f = fixture(missionHTML([name], "미션하기"), {
+        url: "https://reward.onstove.com/ko#stoveDaily=parent",
+      });
+      f.store.set("stove_daily_v2:parent", {
+        task: "missions",
+        owner: "owner",
+        date: f.h.today(),
+      });
+      f.store.set("stove_daily_v2:lock", { id: "owner", time: f.w.Date.now() });
+      const timer = f.w.setTimeout;
+      f.w.setTimeout = (fn, ms) =>
+        timer(() => {
+          f.store.set("stove_daily_v2:lock", {
+            id: "owner",
+            time: f.w.Date.now(),
+          });
+          fn();
+        }, ms);
+      f.w.unsafeWindow = f.w;
+      f.w.open = () => null;
+      let opened = 0,
+        closed = 0,
+        key;
+      f.w.GM_openInTab = (url) => {
+        opened++;
+        key = "stove_daily_v2:visit:" + new URL(url).hash.split("=")[1];
+        if (phase === "ready") f.store.set(key, { ...f.store.get(key), phase });
+        return {
+          close() {
+            closed++;
+          },
+        };
+      };
+      f.h.missionButton(name).onclick = () =>
+        f.w.open(
+          "https://store.onstove.com/ko/taps/105883?entry=flakeshop_mission",
+          "_blank",
+        );
+      const value = await f.h.runMission(f.h.discoverClickMissions()[0], {
+        bundle: true,
+      });
+      assert.equal(value.state, "확인 필요");
+      assert(
+        value.detail.includes(
+          phase === "ready" ? "약관 안내의 닫기" : "자동 처리가 시작되지",
+        ),
+      );
+      assert.equal(opened, phase === "ready" ? 1 : 2);
+      assert.equal(closed, opened);
+      assert(!f.store.has(key));
       f.close();
     });
   await test("공지사항에서 선택 금액 전달 및 활성 새 탭", async () => {
